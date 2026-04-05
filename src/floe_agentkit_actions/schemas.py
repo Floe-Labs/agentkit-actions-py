@@ -272,11 +272,25 @@ class PostBorrowIntentSchema(BaseModel):
             "(default: 86400 = 24 hours)."
         ),
     )
+    on_behalf_of: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional address to receive loan proceeds instead of your wallet. "
+            "If omitted, USDC is sent to your address."
+        ),
+    )
 
     @field_validator("market_id")
     @classmethod
     def validate_market_id(cls, v: str) -> str:
         return _validate_bytes32(v)
+
+    @field_validator("on_behalf_of")
+    @classmethod
+    def validate_on_behalf_of(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _validate_address(v)
+        return v
 
 
 class MatchIntentsSchema(BaseModel):
