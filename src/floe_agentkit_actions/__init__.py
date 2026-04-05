@@ -25,4 +25,9 @@ def floe_action_provider(config: FloeConfig | None = None) -> FloeActionProvider
     return FloeActionProvider(config)
 
 
-__all__ = ["FloeActionProvider", "FloeConfig", "floe_action_provider"]
+from .x402_action_provider import X402ActionProvider, X402Config, x402_action_provider
+
+__all__ = [
+    "FloeActionProvider", "FloeConfig", "floe_action_provider",
+    "X402ActionProvider", "X402Config", "x402_action_provider",
+]
