@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import math
+import re
 import time
 import secrets
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 from coinbase_agentkit import ActionProvider, EvmWalletProvider, Network, create_action
@@ -14,7 +15,6 @@ from web3 import Web3
 
 from .constants import (
     BASE_MAINNET_MATCHER,
-    BASIS_POINTS,
     ERC20_ABI,
 )
 from .utils import (
@@ -74,8 +74,6 @@ OPERATOR_ABI: list[dict[str, Any]] = [
 _w3 = Web3()
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _ADDRESS_PATTERN = r"^0x[a-fA-F0-9]{40}$"
-
-import re
 
 
 def _validate_address(v: str) -> str:
@@ -161,7 +159,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         self._facilitator_api_key = cfg.facilitator_api_key
 
     def supports_network(self, network: Network) -> bool:
-        return network.chain_id == "8453"
+        return network.chain_id in ("8453", "84532")
 
     def _facilitator_fetch(self, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
         import urllib.request
@@ -171,6 +169,10 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             raise ValueError("facilitator_url not configured")
 
         url = f"{self._facilitator_url}{path}"
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._facilitator_api_key}",
@@ -179,7 +181,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return {"status": resp.status, "body": json.loads(resp.read()), "headers": dict(resp.headers)}
+                return {"status": resp.status, "body": json.loads(resp.read()), "headers": {k.lower(): v for k, v in resp.headers.items()}}
         except urllib.error.HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             try:
@@ -223,6 +225,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         try:
             agent_address = wallet_provider.get_address()
             facilitator_url = args["facilitator_url"]
+            # Set facilitator URL before first API call
+            self._facilitator_url = facilitator_url
 
             # Step 1: Pre-register
             nonce = f"{int(time.time())}-{secrets.token_hex(8)}"
@@ -239,7 +243,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             # Step 2: setOperator
             usdc_decimals = 6
-            borrow_limit_raw = int(args["borrow_limit"]) * (10 ** usdc_decimals)
+            borrow_limit_raw = int(float(args["borrow_limit"])) * (10 ** usdc_decimals)
             max_rate_bps = int(args["max_rate_bps"])
             expiry_ts = int(time.time()) + int(args["expiry_days"]) * 86400
 
@@ -252,8 +256,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 transaction={"to": self._matcher_address, "data": encoded}
             )
 
-            # Step 3: Approve collateral
-            approval_amount = borrow_limit_raw * 10
+            # Step 3: Approve collateral (max approval — agent controls via delegation limits)
+            approval_amount = 2**256 - 1  # type(uint256).max
             approve_tx = self._ensure_allowance(
                 wallet_provider, args["collateral_token"], self._matcher_address, approval_amount,
             )

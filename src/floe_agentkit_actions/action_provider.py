@@ -837,8 +837,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 f"- **Duration**: {format_duration(int(args['min_duration']))} -- {format_duration(int(args['max_duration']))}",
                 f"- **Matcher Commission**: {format_bps(int(args.get('matcher_commission_bps', '50')))}",
                 f"- **Expiry**: {format_timestamp(expiry)}",
-                f"- **USDC Sent To**: {format_address(on_behalf_of)}" if on_behalf_of != user_address else "",
-            ])
+            ] + ([f"- **USDC Sent To**: {format_address(on_behalf_of)}"] if on_behalf_of != user_address else []))
         except Exception as e:
             return f"Error posting borrow intent: {e}"
 

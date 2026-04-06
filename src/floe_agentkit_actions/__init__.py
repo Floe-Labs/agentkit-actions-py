@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from .action_provider import FloeActionProvider
 from .types import FloeConfig
+from .x402_action_provider import X402ActionProvider, X402Config, x402_action_provider
 
 
 def floe_action_provider(config: FloeConfig | None = None) -> FloeActionProvider:
@@ -24,8 +25,6 @@ def floe_action_provider(config: FloeConfig | None = None) -> FloeActionProvider
     """
     return FloeActionProvider(config)
 
-
-from .x402_action_provider import X402ActionProvider, X402Config, x402_action_provider
 
 __all__ = [
     "FloeActionProvider", "FloeConfig", "floe_action_provider",
