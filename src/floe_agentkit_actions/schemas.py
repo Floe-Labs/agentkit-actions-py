@@ -565,6 +565,189 @@ class CheckFlashArbReadinessSchema(BaseModel):
         return v
 
 
+# ── Credit facility actions (TS parity port — Phase A) ────────────────────
+
+
+class CheckCreditStatusSchema(BaseModel):
+    """Input schema for check_credit_status — read-only credit facility view."""
+
+    loan_id: str = Field(
+        description="The loan ID of the credit facility to inspect.",
+    )
+
+
+class RepayCreditSchema(BaseModel):
+    """Input schema for repay_credit — full repayment of a credit facility.
+
+    Auto-computes principal + accrued interest + slippage. Use repay_loan
+    directly if you want partial repayment instead.
+    """
+
+    loan_id: str = Field(
+        description="The loan ID of the credit facility to repay.",
+    )
+    slippage_bps: str = Field(
+        default="500",
+        description=(
+            "Slippage tolerance in basis points for interest accrual between "
+            "submission and execution (default: 500 = 5%)."
+        ),
+    )
+
+
+class RequestCreditSchema(BaseModel):
+    """Input schema for request_credit — browse on-chain lend offers."""
+
+    market_id: str = Field(
+        description="The market ID (bytes32) to search for available credit offers.",
+    )
+    min_amount: Optional[str] = Field(
+        default=None,
+        description="Minimum remaining amount in raw token units. Filters out small offers.",
+    )
+    max_rate_bps: Optional[str] = Field(
+        default=None,
+        description="Maximum acceptable interest rate in basis points.",
+    )
+    max_results: int = Field(
+        default=10,
+        description="Maximum number of offers to return (default: 10).",
+    )
+
+    @field_validator("market_id")
+    @classmethod
+    def validate_market_id(cls, v: str) -> str:
+        if not v.startswith("0x") or len(v) != 66:
+            raise ValueError("market_id must be a 0x-prefixed bytes32 (66 chars)")
+        return v
+
+
+class ManualMatchCreditSchema(BaseModel):
+    """Input schema for manual_match_credit — open a credit facility against
+    a specific lend intent. Two-tx flow: register borrow intent + match.
+    """
+
+    lend_intent_hash: str = Field(
+        description="The on-chain hash of the lend intent to match against (from request_credit).",
+    )
+    borrow_amount: str = Field(description="Amount to borrow in raw token units.")
+    collateral_amount: str = Field(description="Collateral to post in raw token units.")
+    max_interest_rate_bps: str = Field(
+        description="Maximum acceptable annual interest rate in basis points.",
+    )
+    min_ltv_bps: str = Field(description="Minimum LTV ratio in basis points for the loan.")
+    duration: str = Field(description="Loan duration in seconds.")
+    market_id: str = Field(description="Market ID (bytes32) for the credit facility.")
+    matcher_commission_bps: str = Field(
+        default="50",
+        description="Commission for the matcher in basis points (default: 50 = 0.50%).",
+    )
+    expiry_seconds: str = Field(
+        default="300",
+        description="Borrow intent validity in seconds (default: 300 = 5 min).",
+    )
+
+    @field_validator("lend_intent_hash", "market_id")
+    @classmethod
+    def validate_bytes32(cls, v: str) -> str:
+        if not v.startswith("0x") or len(v) != 66:
+            raise ValueError("must be a 0x-prefixed bytes32 (66 chars)")
+        return v
+
+
+class RenewCreditLineSchema(BaseModel):
+    """Input schema for renew_credit_line — repay then open new in 3 txs."""
+
+    loan_id: str = Field(description="The existing loan ID to repay.")
+    lend_intent_hash: str = Field(
+        description="The lend intent hash to match for the new credit line.",
+    )
+    borrow_amount: str = Field(description="New borrow amount in raw token units.")
+    collateral_amount: str = Field(description="New collateral amount in raw token units.")
+    max_interest_rate_bps: str = Field(description="Max interest rate for the new loan in bps.")
+    min_ltv_bps: str = Field(description="Min LTV for the new loan in bps.")
+    duration: str = Field(description="New loan duration in seconds.")
+    market_id: str = Field(description="Market ID (bytes32) for the new credit line.")
+    matcher_commission_bps: str = Field(default="50")
+    slippage_bps: str = Field(
+        default="500",
+        description="Slippage for the repayment step (default: 500 = 5%).",
+    )
+
+    @field_validator("lend_intent_hash", "market_id")
+    @classmethod
+    def validate_bytes32(cls, v: str) -> str:
+        if not v.startswith("0x") or len(v) != 66:
+            raise ValueError("must be a 0x-prefixed bytes32 (66 chars)")
+        return v
+
+
+class InstantBorrowSchema(BaseModel):
+    """Input schema for instant_borrow — auto-select best offer + match."""
+
+    market_id: str = Field(description="The market ID (bytes32).")
+    borrow_amount: str = Field(description="Amount to borrow in raw token units.")
+    collateral_amount: str = Field(description="Collateral to post in raw token units.")
+    max_interest_rate_bps: str = Field(description="Max acceptable annual interest rate in bps.")
+    duration: str = Field(description="Loan duration in seconds.")
+    min_ltv_bps: str = Field(default="8000", description="Minimum LTV in bps (default: 8000 = 80%).")
+    on_behalf_of: Optional[str] = Field(
+        default=None,
+        description="Optional address to receive borrowed USDC. If omitted, sent to your wallet.",
+    )
+
+    @field_validator("market_id")
+    @classmethod
+    def validate_market_id(cls, v: str) -> str:
+        if not v.startswith("0x") or len(v) != 66:
+            raise ValueError("market_id must be a 0x-prefixed bytes32 (66 chars)")
+        return v
+
+    @field_validator("on_behalf_of")
+    @classmethod
+    def validate_on_behalf(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _validate_address(v)
+        return v
+
+
+class RepayAndReborrowSchema(BaseModel):
+    """Input schema for repay_and_reborrow — repay + instant_borrow in one."""
+
+    loan_id: str = Field(description="The existing loan ID to repay and renew.")
+    new_borrow_amount: Optional[str] = Field(
+        default=None,
+        description="New borrow amount. If omitted, uses the existing loan's amount.",
+    )
+    new_collateral_amount: Optional[str] = Field(
+        default=None,
+        description="New collateral amount. If omitted, uses the existing loan's amount.",
+    )
+    max_interest_rate_bps: Optional[str] = Field(
+        default=None,
+        description="Max interest rate for the new loan. If omitted, uses the existing loan's rate.",
+    )
+    duration: Optional[str] = Field(
+        default=None,
+        description="New loan duration in seconds. If omitted, uses the existing loan's duration.",
+    )
+    slippage_bps: str = Field(
+        default="500",
+        description="Slippage for the repayment step (default: 500 = 5%).",
+    )
+    on_behalf_of: Optional[str] = Field(
+        default=None,
+        description="Optional address to receive USDC on the new loan.",
+    )
+
+    @field_validator("on_behalf_of")
+    @classmethod
+    def validate_on_behalf(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _validate_address(v)
+        return v
+
+
 class VerifyFlashArbReceiverSchema(BaseModel):
     """Input schema for verifying an existing FlashArbReceiver contract."""
 

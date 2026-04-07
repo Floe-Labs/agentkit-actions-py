@@ -26,14 +26,13 @@ from floe_agentkit_actions.x402_action_provider import X402ActionProvider
 #   (a) Someone added a new action — bump the expected count and update
 #       floe-labs-docs if the combined total changed
 #   (b) Someone removed an action — investigate whether that was intentional
-FLOE_PROVIDER_ACTION_COUNT = 23
+FLOE_PROVIDER_ACTION_COUNT = 30  # full TS parity: 23 base + 7 credit-facility
 X402_PROVIDER_ACTION_COUNT = 6
-TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 29
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 36
 
-# The TypeScript reference port. Gap = TS - Python. Close the gap by
-# porting the missing actions.
+# The TypeScript reference port. Gap = TS - Python. Closed.
 TS_REFERENCE_TOTAL = 36
-PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 7
+PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0
 
 
 def _count_actions(provider_cls) -> int:

@@ -32,6 +32,9 @@ from .constants import (
     FLASH_ARB_RECEIVER_ABI,
     LENDING_MATCHER_ABI,
     LENDING_VIEWS_ABI,
+    LOG_INTENTS_MATCHED_DETAILED_EVENT,
+    LOG_LENDER_OFFER_POSTED_EVENT,
+    MATCHER_DEPLOYMENT_BLOCK,
     ORACLE_PRICE_SCALE,
     PRICE_ORACLE_ABI,
 )
@@ -41,6 +44,7 @@ from .flash_arb_bytecode import (
 )
 from .schemas import (
     AddCollateralSchema,
+    CheckCreditStatusSchema,
     CheckFlashArbReadinessSchema,
     CheckLoanHealthSchema,
     DeployFlashArbReceiverSchema,
@@ -56,11 +60,17 @@ from .schemas import (
     GetMarketsSchema,
     GetMyLoansSchema,
     GetPriceSchema,
+    InstantBorrowSchema,
     LiquidateLoanSchema,
+    ManualMatchCreditSchema,
     MatchIntentsSchema,
     PostBorrowIntentSchema,
     PostLendIntentSchema,
+    RenewCreditLineSchema,
+    RepayAndReborrowSchema,
+    RepayCreditSchema,
     RepayLoanSchema,
+    RequestCreditSchema,
     VerifyFlashArbReceiverSchema,
     WithdrawCollateralSchema,
 )
@@ -102,7 +112,9 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
         self._matcher_address: str = cfg.lending_intent_matcher_address or BASE_MAINNET_MATCHER
         self._views_address: str = cfg.lending_views_address or BASE_MAINNET_VIEWS
         self._known_market_ids: list[str] = cfg.known_market_ids or []
+        self._rpc_url: Optional[str] = cfg.rpc_url
         self._deployed_receiver_address: Optional[str] = None
+        self._public_client: Optional[Web3] = None
 
     def supports_network(self, network: Network) -> bool:
         return network.chain_id in ("8453", "84532")
@@ -1936,3 +1948,836 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             return "\n".join(lines)
         except Exception as e:
             return f"Error verifying FlashArbReceiver: {e}"
+
+    # ════════════════════════════════════════════════════════════════════════
+    #  CREDIT FACILITY ACTIONS — Phase A parity port from TS agentkit
+    # ════════════════════════════════════════════════════════════════════════
+    #
+    # The TS agentkit (agentkit-actions) exposes 30 Floe actions including
+    # high-level credit facility wrappers. This Python port currently has
+    # the 23 base actions above. The credit facility block below closes
+    # the gap incrementally.
+    #
+    # Phase A (NO new infrastructure required):
+    #   - check_credit_status   ✓
+    #   - repay_credit          ✓
+    #
+    # Phase A.2 (requires RPC client + event log scanning infrastructure):
+    #   - request_credit        (needs FloeConfig.rpc_url + LOG_LENDER_OFFER_POSTED ABI)
+    #   - manual_match_credit   (depends on request_credit UX flow)
+    #   - renew_credit_line     (depends on repay_credit + manual_match_credit)
+    #
+    # Phase B (requires Python floe-credit-sdk client adapter):
+    #   - instant_borrow
+    #   - repay_and_reborrow
+    #
+    # Parity tracker: tests/test_action_count.py
+
+    @create_action(
+        name="check_credit_status",
+        description=(
+            "Check the status of an active credit facility (loan). Returns a "
+            "combined view of health, remaining balance, accrued interest, and "
+            "time to expiry. Designed for AI agents monitoring their working "
+            "capital positions."
+        ),
+        schema=CheckCreditStatusSchema,
+    )
+    def check_credit_status(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            loan_id = int(args["loan_id"])
+
+            loan = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getLoan",
+                args=[loan_id],
+            )
+            current_ltv = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getCurrentLtvBps",
+                args=[loan_id],
+            )
+            healthy = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="isHealthy",
+                args=[loan_id],
+            )
+            interest_data = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getAccruedInterest",
+                args=[loan_id],
+            )
+
+            if loan.repaid:
+                return (
+                    f"## Credit Facility -- Loan #{args['loan_id']}\n\n"
+                    f"**Status**: Fully repaid. No active credit facility."
+                )
+
+            loan_meta = resolve_token_meta(loan.loanToken, wallet_provider)
+            collateral_meta = resolve_token_meta(loan.collateralToken, wallet_provider)
+
+            interest_amount = int(interest_data[0])
+            principal = int(loan.principal)
+            rate_bps = int(loan.interestRateBps)
+            duration = int(loan.duration)
+            min_int_bps = int(loan.minInterestBps)
+            start_time = int(loan.startTime)
+            grace_period = int(loan.gracePeriod)
+            liq_ltv_bps = int(loan.liquidationLtvBps)
+            cur_ltv_bps = int(current_ltv)
+
+            end_time = start_time + duration
+            grace_end = end_time + grace_period
+            now = int(time.time())
+            time_remaining = end_time - now if end_time > now else 0
+            is_overdue = now > grace_end
+            in_grace_period = now > end_time and now <= grace_end
+
+            total_debt = principal + interest_amount
+            distance_bps = liq_ltv_bps - cur_ltv_bps
+
+            # Early repayment terms (mirrors TS contract math)
+            full_term_interest = (principal * rate_bps * duration) // (10000 * 365 * 24 * 60 * 60)
+            is_past_maturity = now >= end_time
+            early_repay_penalty = 0
+            if not is_past_maturity and min_int_bps > 0:
+                min_required = (full_term_interest * min_int_bps) // 10000
+                if min_required > interest_amount:
+                    early_repay_penalty = min_required - interest_amount
+            total_repay_now = principal + interest_amount + early_repay_penalty
+
+            lines = [
+                f"## Credit Facility Status -- Loan #{args['loan_id']}\n",
+                "### Balance",
+                f"- **Principal**: {format_token_amount(principal, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Accrued Interest**: {format_token_amount(interest_amount, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Total Debt**: {format_token_amount(total_debt, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Collateral**: {format_token_amount(int(loan.collateralAmount), collateral_meta['decimals'], collateral_meta['symbol'])}",
+                "",
+                "### Health",
+                f"- **Healthy**: {'Yes' if healthy else 'NO -- Liquidatable!'}",
+                f"- **Current LTV**: {format_bps(cur_ltv_bps)}",
+                f"- **Liquidation LTV**: {format_bps(liq_ltv_bps)}",
+                f"- **Buffer**: {format_bps(distance_bps)} ({compute_health_percent(cur_ltv_bps, liq_ltv_bps)})",
+                "",
+                "### Timeline",
+                f"- **Started**: {format_timestamp(start_time)}",
+                f"- **Duration**: {format_duration(duration)}",
+                f"- **Time Remaining**: {format_duration(time_remaining) if time_remaining > 0 else ('OVERDUE' if is_overdue else 'Expired (in grace period)')}",
+                f"- **Grace Period**: {format_duration(grace_period) if grace_period > 0 else 'Protocol default'}",
+                "",
+                "### Early Repayment Terms",
+                f"- **Min Interest**: {f'{format_bps(min_int_bps)} of full-term interest' if min_int_bps > 0 else 'None (no minimum)'}",
+                f"- **Full-Term Interest**: {format_token_amount(full_term_interest, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Early Repay Penalty**: {format_token_amount(early_repay_penalty, loan_meta['decimals'], loan_meta['symbol']) if early_repay_penalty > 0 else 'None'}",
+                f"- **Total If Repaid Now**: {format_token_amount(total_repay_now, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Interest Rate**: {format_bps(rate_bps)} APR",
+            ]
+
+            if not healthy:
+                lines.append(
+                    "\n**CRITICAL**: This credit facility can be liquidated. Repay immediately or add collateral."
+                )
+            elif distance_bps < 500:
+                lines.append(
+                    "\n**Warning**: Close to liquidation threshold. Consider adding collateral."
+                )
+
+            if in_grace_period:
+                lines.append(
+                    "\n**Warning**: Loan has expired and is in grace period. Repay before grace period ends to avoid overdue liquidation."
+                )
+            elif is_overdue:
+                lines.append(
+                    "\n**CRITICAL**: Loan is overdue. It can be liquidated at any time."
+                )
+            elif 0 < time_remaining < 86400:
+                lines.append(
+                    "\n**Notice**: Less than 24 hours remaining. Consider repaying or renewing."
+                )
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error checking credit status: {e}"
+
+    @create_action(
+        name="repay_credit",
+        description=(
+            "Fully repay a credit facility (loan). Auto-computes principal + "
+            "accrued interest + slippage and submits the repayLoan transaction. "
+            "Use repay_loan directly for partial repayment."
+        ),
+        schema=RepayCreditSchema,
+    )
+    def repay_credit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            loan_id = int(args["loan_id"])
+            slippage_bps = int(args.get("slippage_bps", "500"))
+
+            loan = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getLoan",
+                args=[loan_id],
+            )
+            interest_data = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getAccruedInterest",
+                args=[loan_id],
+            )
+            interest_amount = int(interest_data[0])
+
+            if loan.repaid:
+                return f"Loan #{args['loan_id']} is already repaid."
+
+            principal = int(loan.principal)
+            if principal == 0:
+                return f"Loan #{args['loan_id']} has zero principal — already settled."
+
+            loan_meta = resolve_token_meta(loan.loanToken, wallet_provider)
+
+            # Full repayment: repay_amount == principal
+            estimated_total = principal + interest_amount
+            max_total_repayment = estimated_total + (estimated_total * slippage_bps) // BASIS_POINTS
+
+            # Auto-approve loan token for the maximum we might be charged
+            approval_result = self._ensure_allowance(
+                wallet_provider,
+                loan.loanToken,
+                self._matcher_address,
+                max_total_repayment,
+            )
+
+            contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
+            encoded = contract.encode_abi(
+                "repayLoan",
+                args=[loan_id, principal, max_total_repayment],
+            )
+
+            tx_hash = wallet_provider.send_transaction(
+                transaction={"to": self._matcher_address, "data": encoded}
+            )
+
+            return "\n".join([
+                "## Credit Facility Repaid\n",
+                f"- **Approval**: {approval_result or 'Allowance sufficient, no approval needed'}",
+                f"- **Transaction**: {tx_hash}",
+                f"- **Loan ID**: {args['loan_id']}",
+                f"- **Principal Repaid**: {format_token_amount(principal, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Estimated Interest**: {format_token_amount(interest_amount, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Max Total Repayment (with {format_bps(slippage_bps)} slippage)**: {format_token_amount(max_total_repayment, loan_meta['decimals'], loan_meta['symbol'])}",
+                "",
+                "Credit facility is now closed. Collateral will be returned to your wallet on the next block.",
+            ])
+        except Exception as e:
+            return f"Error repaying credit facility: {e}"
+
+    # ── Phase A.2 / B helpers ─────────────────────────────────────────────
+
+    def _get_public_client(self) -> Web3:
+        """Lazy Web3 HTTP client for event log scanning. Requires rpc_url."""
+        if self._public_client is None:
+            if not self._rpc_url:
+                raise ValueError(
+                    "RPC URL not configured. Pass rpc_url in FloeConfig to "
+                    "browse available credit offers (request_credit, "
+                    "instant_borrow, repay_and_reborrow)."
+                )
+            self._public_client = Web3(Web3.HTTPProvider(self._rpc_url))
+        return self._public_client
+
+    def _scan_available_lend_intents(
+        self,
+        wallet_provider: EvmWalletProvider,
+        market_id: str,
+    ) -> list[dict]:
+        """Scan LogLenderOfferPosted events for a market and read intents.
+
+        Returns list of {hash, intent} for offers that are unrevoked, partially
+        unfilled, and unexpired. Intended to be monkey-patched in tests.
+        """
+        client = self._get_public_client()
+        contract = client.eth.contract(
+            address=Web3.to_checksum_address(self._matcher_address),
+            abi=LOG_LENDER_OFFER_POSTED_EVENT,
+        )
+        market_id_bytes = bytes.fromhex(market_id[2:])
+        logs = contract.events.LogLenderOfferPosted.get_logs(
+            from_block=MATCHER_DEPLOYMENT_BLOCK,
+            to_block="latest",
+            argument_filters={"marketId": market_id_bytes},
+        )
+        seen: set[bytes] = set()
+        unique_hashes: list[bytes] = []
+        for log in logs:
+            h = log["args"]["offerHash"]
+            if h not in seen:
+                seen.add(h)
+                unique_hashes.append(h)
+
+        now = int(time.time())
+        zero_addr = "0x0000000000000000000000000000000000000000"
+        results: list[dict] = []
+        for h in unique_hashes:
+            intent = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getOnChainLendIntent",
+                args=[h],
+            )
+            if (
+                getattr(intent, "lender", zero_addr).lower() != zero_addr
+                and int(intent.filledAmount) < int(intent.amount)
+                and int(intent.expiry) > now
+            ):
+                results.append({"hash": "0x" + h.hex(), "intent": intent})
+        return results
+
+    def _extract_loan_id_from_receipt(self, receipt: Any) -> Optional[str]:
+        """Parse LogIntentsMatchedDetailed from a transaction receipt's logs."""
+        try:
+            logs = receipt.get("logs") if isinstance(receipt, dict) else getattr(receipt, "logs", None)
+            if not logs:
+                return None
+            contract = _w3.eth.contract(abi=LOG_INTENTS_MATCHED_DETAILED_EVENT)
+            event = contract.events.LogIntentsMatchedDetailed()
+            for log in logs:
+                try:
+                    decoded = event.process_log(log)
+                    return str(decoded["args"]["loanId"])
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
+
+    def _random_salt(self) -> str:
+        return "0x" + secrets.token_hex(32)
+
+    def _lend_intent_to_tuple(self, lend_intent: Any) -> tuple:
+        """Convert a getOnChainLendIntent result into the ABI tuple ordering."""
+        market_id = lend_intent.marketId
+        if isinstance(market_id, str) and market_id.startswith("0x"):
+            market_id = bytes.fromhex(market_id[2:])
+        salt = lend_intent.salt
+        if isinstance(salt, str) and salt.startswith("0x"):
+            salt = bytes.fromhex(salt[2:])
+        return (
+            Web3.to_checksum_address(lend_intent.lender),
+            Web3.to_checksum_address(lend_intent.onBehalfOf),
+            int(lend_intent.amount),
+            int(lend_intent.minFillAmount),
+            int(lend_intent.filledAmount),
+            int(lend_intent.minInterestRateBps),
+            int(lend_intent.maxLtvBps),
+            int(lend_intent.minDuration),
+            int(lend_intent.maxDuration),
+            bool(lend_intent.allowPartialFill),
+            int(lend_intent.validFromTimestamp),
+            int(lend_intent.expiry),
+            market_id,
+            salt,
+            int(lend_intent.gracePeriod),
+            int(lend_intent.minInterestBps),
+            [],
+            [],
+            [],
+        )
+
+    def _build_borrow_struct(
+        self,
+        *,
+        borrower: str,
+        on_behalf_of: str,
+        borrow_amount: int,
+        collateral_amount: int,
+        max_rate_bps: int,
+        min_ltv_bps: int,
+        duration: int,
+        matcher_commission_bps: int,
+        expiry: int,
+        market_id: str,
+        salt: str,
+    ) -> tuple:
+        """Tuple form of BorrowIntent matching the Solidity ABI ordering."""
+        market_id_b = bytes.fromhex(market_id[2:]) if isinstance(market_id, str) else market_id
+        salt_b = bytes.fromhex(salt[2:]) if isinstance(salt, str) else salt
+        return (
+            Web3.to_checksum_address(borrower),
+            Web3.to_checksum_address(on_behalf_of),
+            borrow_amount,
+            collateral_amount,
+            borrow_amount,  # min_fill_amount
+            max_rate_bps,
+            min_ltv_bps,
+            duration,
+            duration,
+            False,  # allow_partial_fill
+            0,  # valid_from_timestamp
+            matcher_commission_bps,
+            expiry,
+            market_id_b,
+            salt_b,
+            [],  # conditions
+            [],  # pre_hooks
+            [],  # post_hooks
+        )
+
+    @create_action(
+        name="request_credit",
+        description=(
+            "Browse available credit offers for a market. Scans on-chain events "
+            "and reads intent data directly from the contract. Shows how much "
+            "capital is available, at what rates, and for how long. Use this to "
+            "find a lend intent to match against with manual_match_credit. "
+            "Requires rpc_url in FloeConfig."
+        ),
+        schema=RequestCreditSchema,
+    )
+    def request_credit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            market_id = args["market_id"]
+            available = self._scan_available_lend_intents(wallet_provider, market_id)
+            market = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getMarket",
+                args=[market_id],
+            )
+
+            if not available:
+                return (
+                    f"## No Credit Offers Available\n\n"
+                    f"No open lend intents found for market {market_id}. "
+                    f"Try a different market or check back later."
+                )
+
+            loan_meta = resolve_token_meta(market.loanToken, wallet_provider)
+            collateral_meta = resolve_token_meta(market.collateralToken, wallet_provider)
+
+            filtered = available
+            if args.get("min_amount"):
+                min_amt = int(args["min_amount"])
+                filtered = [
+                    o for o in filtered
+                    if int(o["intent"].amount) - int(o["intent"].filledAmount) >= min_amt
+                ]
+            if args.get("max_rate_bps"):
+                max_rate = int(args["max_rate_bps"])
+                filtered = [
+                    o for o in filtered
+                    if int(o["intent"].minInterestRateBps) <= max_rate
+                ]
+
+            filtered.sort(
+                key=lambda o: int(o["intent"].amount) - int(o["intent"].filledAmount),
+                reverse=True,
+            )
+            max_results = int(args.get("max_results", 10))
+            filtered = filtered[:max_results]
+
+            if not filtered:
+                return (
+                    f"## No Matching Credit Offers\n\n"
+                    f"Found {len(available)} open offer(s) in "
+                    f"{loan_meta['symbol']}/{collateral_meta['symbol']}, but none match your filters."
+                )
+
+            lines = [
+                f"## Available Credit Offers -- {loan_meta['symbol']}/{collateral_meta['symbol']}\n",
+                f"Found {len(filtered)} offer(s):\n",
+            ]
+            for entry in filtered:
+                h = entry["hash"]
+                intent = entry["intent"]
+                remaining = int(intent.amount) - int(intent.filledAmount)
+                grace = int(getattr(intent, "gracePeriod", 0))
+                lines.extend([
+                    f"### Offer `{h[:10]}...`",
+                    f"- **Offer Hash**: {h}",
+                    f"- **Lender**: {format_address(intent.lender)}",
+                    f"- **Available**: {format_token_amount(remaining, loan_meta['decimals'], loan_meta['symbol'])}",
+                    f"- **Min Interest Rate**: {format_bps(int(intent.minInterestRateBps))}",
+                    f"- **Max LTV**: {format_bps(int(intent.maxLtvBps))}",
+                    f"- **Duration**: {format_duration(int(intent.minDuration))} -- {format_duration(int(intent.maxDuration))}",
+                    f"- **Expiry**: {format_timestamp(int(intent.expiry))}",
+                    f"- **Partial Fill**: {'Yes' if intent.allowPartialFill else 'No'}",
+                    f"- **Grace Period**: {format_duration(grace) if grace > 0 else 'Protocol default'}",
+                    "",
+                ])
+            lines.append(
+                "\nTo open a credit facility, use **manual_match_credit** with the "
+                "offer hash of your chosen offer."
+            )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error browsing credit offers: {e}"
+
+    @create_action(
+        name="manual_match_credit",
+        description=(
+            "Open a credit facility by matching against a specific lend intent. "
+            "Two-transaction operation: (1) registers your borrow intent with "
+            "automatic collateral approval, (2) matches it with the chosen lend "
+            "intent to create a loan. Returns the new loan ID on success."
+        ),
+        schema=ManualMatchCreditSchema,
+    )
+    def manual_match_credit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            user = wallet_provider.get_address()
+            lend_hash = args["lend_intent_hash"]
+            market_id = args["market_id"]
+            borrow_amount = int(args["borrow_amount"])
+            collateral_amount = int(args["collateral_amount"])
+            max_rate_bps = int(args["max_interest_rate_bps"])
+            min_ltv_bps = int(args["min_ltv_bps"])
+            duration = int(args["duration"])
+            matcher_commission_bps = int(args.get("matcher_commission_bps", "50"))
+            expiry_seconds = int(args.get("expiry_seconds", "300"))
+            now = int(time.time())
+            expiry = now + expiry_seconds
+            salt = self._random_salt()
+
+            market = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getMarket",
+                args=[market_id],
+            )
+            lend_intent = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getOnChainLendIntent",
+                args=[lend_hash],
+            )
+
+            zero_addr = "0x0000000000000000000000000000000000000000"
+            if getattr(lend_intent, "lender", zero_addr).lower() == zero_addr:
+                return (
+                    f"Lend intent {lend_hash} not found on-chain. It may have "
+                    f"been revoked or already fully matched."
+                )
+
+            remaining = int(lend_intent.amount) - int(lend_intent.filledAmount)
+            if remaining < borrow_amount:
+                loan_meta = resolve_token_meta(market.loanToken, wallet_provider)
+                return (
+                    f"Lend intent only has "
+                    f"{format_token_amount(remaining, loan_meta['decimals'], loan_meta['symbol'])} "
+                    f"remaining, but you requested "
+                    f"{format_token_amount(borrow_amount, loan_meta['decimals'], loan_meta['symbol'])}."
+                )
+
+            # Auto-approve 101% of collateral
+            approval_amount = (collateral_amount * 101) // 100
+            approval_result = self._ensure_allowance(
+                wallet_provider,
+                market.collateralToken,
+                self._matcher_address,
+                approval_amount,
+            )
+
+            borrow_struct = self._build_borrow_struct(
+                borrower=user,
+                on_behalf_of=user,
+                borrow_amount=borrow_amount,
+                collateral_amount=collateral_amount,
+                max_rate_bps=max_rate_bps,
+                min_ltv_bps=min_ltv_bps,
+                duration=duration,
+                matcher_commission_bps=matcher_commission_bps,
+                expiry=expiry,
+                market_id=market_id,
+                salt=salt,
+            )
+
+            contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
+
+            # TX 1: register borrow intent
+            register_data = contract.encode_abi(
+                "registerBorrowIntent", args=[borrow_struct]
+            )
+            register_tx = wallet_provider.send_transaction(
+                transaction={"to": self._matcher_address, "data": register_data}
+            )
+            wallet_provider.wait_for_transaction_receipt(register_tx)
+
+            # TX 2: match
+            lend_tuple = self._lend_intent_to_tuple(lend_intent)
+            market_id_bytes = bytes.fromhex(market_id[2:])
+            match_data = contract.encode_abi(
+                "matchLoanIntents",
+                args=[lend_tuple, b"", borrow_struct, b"", market_id_bytes, True, True],
+            )
+            match_tx = wallet_provider.send_transaction(
+                transaction={"to": self._matcher_address, "data": match_data}
+            )
+            match_receipt = wallet_provider.wait_for_transaction_receipt(match_tx)
+
+            loan_id = self._extract_loan_id_from_receipt(match_receipt)
+            loan_meta = resolve_token_meta(market.loanToken, wallet_provider)
+            collateral_meta = resolve_token_meta(market.collateralToken, wallet_provider)
+
+            return "\n".join([
+                "## Credit Facility Opened\n",
+                f"- **Approval**: {approval_result or 'Allowance sufficient, no approval needed'}",
+                f"- **Register Borrow Intent TX**: {register_tx}",
+                f"- **Match TX**: {match_tx}",
+                f"- **Loan ID**: {loan_id or 'Check transaction receipt'}",
+                f"- **Borrowed**: {format_token_amount(borrow_amount, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Collateral**: {format_token_amount(collateral_amount, collateral_meta['decimals'], collateral_meta['symbol'])}",
+                f"- **Interest Rate**: up to {format_bps(max_rate_bps)}",
+                f"- **Duration**: {format_duration(duration)}",
+            ])
+        except Exception as e:
+            return f"Error opening credit facility: {e}"
+
+    @create_action(
+        name="renew_credit_line",
+        description=(
+            "Renew an expiring credit facility in two phases: repay the existing "
+            "loan, then open a new one by matching a fresh lend intent. Executes "
+            "3 transactions: (1) repay existing loan, (2) register new borrow "
+            "intent, (3) match with new lend intent. If the second phase fails, "
+            "the repayment still succeeds and is reported."
+        ),
+        schema=RenewCreditLineSchema,
+    )
+    def renew_credit_line(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            old_loan_id = int(args["loan_id"])
+            slippage_bps = int(args.get("slippage_bps", "500"))
+
+            # ── Phase 1: repay existing loan ──
+            old_loan = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getLoan",
+                args=[old_loan_id],
+            )
+            interest_data = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getAccruedInterest",
+                args=[old_loan_id],
+            )
+            if old_loan.repaid:
+                return (
+                    f"Loan #{args['loan_id']} is already repaid. Use "
+                    f"manual_match_credit to open a new credit facility."
+                )
+
+            loan_meta = resolve_token_meta(old_loan.loanToken, wallet_provider)
+            principal = int(old_loan.principal)
+            interest_amount = int(interest_data[0])
+            estimated_total = principal + interest_amount
+            max_total_repayment = (
+                estimated_total + (estimated_total * slippage_bps) // BASIS_POINTS
+            )
+            repay_approval = self._ensure_allowance(
+                wallet_provider,
+                old_loan.loanToken,
+                self._matcher_address,
+                max_total_repayment,
+            )
+            contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
+            repay_data = contract.encode_abi(
+                "repayLoan", args=[old_loan_id, principal, max_total_repayment]
+            )
+            repay_tx = wallet_provider.send_transaction(
+                transaction={"to": self._matcher_address, "data": repay_data}
+            )
+            wallet_provider.wait_for_transaction_receipt(repay_tx)
+
+            # ── Phase 2: open new credit facility ──
+            try:
+                new_result = self.manual_match_credit(
+                    wallet_provider,
+                    {
+                        "lend_intent_hash": args["lend_intent_hash"],
+                        "borrow_amount": args["borrow_amount"],
+                        "collateral_amount": args["collateral_amount"],
+                        "max_interest_rate_bps": args["max_interest_rate_bps"],
+                        "min_ltv_bps": args["min_ltv_bps"],
+                        "duration": args["duration"],
+                        "market_id": args["market_id"],
+                        "matcher_commission_bps": args.get("matcher_commission_bps", "50"),
+                        "expiry_seconds": "300",
+                    },
+                )
+                if new_result.startswith("Error") or "not found on-chain" in new_result:
+                    raise RuntimeError(new_result)
+            except Exception as match_err:
+                return "\n".join([
+                    "## Credit Line -- Partial Renewal\n",
+                    "### Old Loan Repaid",
+                    f"- **Repay TX**: {repay_tx}",
+                    f"- **Loan ID**: {args['loan_id']}",
+                    f"- **Principal Repaid**: {format_token_amount(principal, loan_meta['decimals'], loan_meta['symbol'])}",
+                    f"- **Repay Approval**: {repay_approval or 'No approval needed'}",
+                    "",
+                    "### New Credit -- FAILED",
+                    f"{match_err}",
+                    "\nThe old loan was repaid successfully. Use **manual_match_credit** to retry.",
+                ])
+
+            return "\n".join([
+                "## Credit Line Renewed\n",
+                "### Old Loan Repaid",
+                f"- **Repay TX**: {repay_tx}",
+                f"- **Old Loan ID**: {args['loan_id']}",
+                f"- **Principal Repaid**: {format_token_amount(principal, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Repay Approval**: {repay_approval or 'No approval needed'}",
+                "",
+                new_result,
+            ])
+        except Exception as e:
+            return f"Error renewing credit line: {e}"
+
+    @create_action(
+        name="instant_borrow",
+        description=(
+            "Instantly borrow funds by auto-selecting the best available lend "
+            "intent. Single action: queries the on-chain intent book, picks the "
+            "lowest-rate compatible offer, and executes the 2-tx borrow flow. "
+            "For DeFi agents that need capital in seconds, not minutes of "
+            "browsing. Requires rpc_url in FloeConfig."
+        ),
+        schema=InstantBorrowSchema,
+    )
+    def instant_borrow(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            market_id = args["market_id"]
+            borrow_amount = int(args["borrow_amount"])
+            max_rate_bps = int(args["max_interest_rate_bps"])
+            duration = int(args["duration"])
+
+            available = self._scan_available_lend_intents(wallet_provider, market_id)
+            # Filter compatible: enough remaining, rate <= max, duration in window
+            compatible = []
+            for entry in available:
+                intent = entry["intent"]
+                remaining = int(intent.amount) - int(intent.filledAmount)
+                if remaining < borrow_amount:
+                    continue
+                if int(intent.minInterestRateBps) > max_rate_bps:
+                    continue
+                if int(intent.minDuration) > duration or int(intent.maxDuration) < duration:
+                    continue
+                compatible.append(entry)
+
+            if not compatible:
+                return (
+                    "No matching liquidity found for your borrow request. "
+                    "Try adjusting your max_interest_rate_bps, duration, or "
+                    "borrow_amount."
+                )
+
+            # Pick lowest rate
+            compatible.sort(key=lambda e: int(e["intent"].minInterestRateBps))
+            best = compatible[0]
+
+            return self.manual_match_credit(
+                wallet_provider,
+                {
+                    "lend_intent_hash": best["hash"],
+                    "borrow_amount": args["borrow_amount"],
+                    "collateral_amount": args["collateral_amount"],
+                    "max_interest_rate_bps": args["max_interest_rate_bps"],
+                    "min_ltv_bps": args.get("min_ltv_bps", "8000"),
+                    "duration": args["duration"],
+                    "market_id": market_id,
+                    "matcher_commission_bps": "50",
+                    "expiry_seconds": "300",
+                },
+            )
+        except Exception as e:
+            return f"Error in instant borrow: {e}"
+
+    @create_action(
+        name="repay_and_reborrow",
+        description=(
+            "Repay an existing credit facility and instantly borrow again in "
+            "one action. Auto-selects the best available lend intent for the "
+            "new loan. If the reborrow fails (no liquidity), the repayment "
+            "still succeeds. Use this for agents cycling credit continuously."
+        ),
+        schema=RepayAndReborrowSchema,
+    )
+    def repay_and_reborrow(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            old_loan_id = int(args["loan_id"])
+            old_loan = wallet_provider.read_contract(
+                contract_address=self._matcher_address,
+                abi=LENDING_MATCHER_ABI,
+                function_name="getLoan",
+                args=[old_loan_id],
+            )
+            if old_loan.repaid:
+                return (
+                    f"Loan #{args['loan_id']} is already repaid. Use "
+                    f"instant_borrow to open a new credit facility."
+                )
+
+            # Step 1: repay
+            repay_result = self.repay_credit(
+                wallet_provider,
+                {
+                    "loan_id": args["loan_id"],
+                    "slippage_bps": args.get("slippage_bps", "500"),
+                },
+            )
+            if repay_result.startswith("Error"):
+                return repay_result
+
+            # Step 2: instant_borrow with old loan defaults if not provided
+            borrow_amount = args.get("new_borrow_amount") or str(int(old_loan.principal))
+            collateral_amount = (
+                args.get("new_collateral_amount") or str(int(old_loan.collateralAmount))
+            )
+            max_rate = (
+                args.get("max_interest_rate_bps") or str(int(old_loan.interestRateBps))
+            )
+            duration = args.get("duration") or str(int(old_loan.duration))
+            market_id = "0x" + old_loan.marketId.hex() if isinstance(old_loan.marketId, (bytes, bytearray)) else old_loan.marketId
+
+            new_result = self.instant_borrow(
+                wallet_provider,
+                {
+                    "market_id": market_id,
+                    "borrow_amount": borrow_amount,
+                    "collateral_amount": collateral_amount,
+                    "max_interest_rate_bps": max_rate,
+                    "duration": duration,
+                    "min_ltv_bps": "8000",
+                },
+            )
+
+            if new_result.startswith("Error") or new_result.startswith("No matching"):
+                return "\n".join([
+                    "## Credit Line -- Partial Renewal\n",
+                    "### Old Loan Repaid",
+                    repay_result,
+                    "",
+                    "### New Credit -- FAILED",
+                    new_result,
+                    "\nOld loan repaid successfully. Use **instant_borrow** to retry.",
+                ])
+
+            return "\n".join([
+                "## Credit Line Renewed\n",
+                "### Old Loan Repaid",
+                repay_result,
+                "",
+                "### New Credit Facility Opened",
+                new_result,
+            ])
+        except Exception as e:
+            return f"Error in repay and reborrow: {e}"

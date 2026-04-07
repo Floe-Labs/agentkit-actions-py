@@ -504,6 +504,48 @@ PRICE_ORACLE_ABI: list[dict] = [
     },
 ]
 
+# == Event ABI fragments for credit-facility actions ===========================
+
+# LogLenderOfferPosted event — emitted when a lender posts an on-chain
+# lend intent. request_credit scans these to discover available offers.
+LOG_LENDER_OFFER_POSTED_EVENT: list[dict] = [
+    {
+        "type": "event",
+        "name": "LogLenderOfferPosted",
+        "anonymous": False,
+        "inputs": [
+            {"name": "lender", "type": "address", "indexed": True},
+            {"name": "marketId", "type": "bytes32", "indexed": True},
+            {"name": "offerHash", "type": "bytes32", "indexed": False},
+        ],
+    },
+]
+
+# LogIntentsMatchedDetailed event — emitted when matchLoanIntents creates
+# a new loan. manual_match_credit and instant_borrow parse this from the
+# transaction receipt to extract the new loan ID.
+LOG_INTENTS_MATCHED_DETAILED_EVENT: list[dict] = [
+    {
+        "type": "event",
+        "name": "LogIntentsMatchedDetailed",
+        "anonymous": False,
+        "inputs": [
+            {"name": "lender", "type": "address", "indexed": True},
+            {"name": "borrower", "type": "address", "indexed": True},
+            {"name": "matcher", "type": "address", "indexed": True},
+            {"name": "marketId", "type": "bytes32", "indexed": False},
+            {"name": "loanId", "type": "uint256", "indexed": False},
+            {"name": "lendIntentHash", "type": "bytes32", "indexed": False},
+            {"name": "borrowIntentHash", "type": "bytes32", "indexed": False},
+        ],
+    },
+]
+
+# Block number where LendingIntentMatcher was deployed on Base mainnet.
+# Bounds the event scan range so we don't scan from genesis.
+MATCHER_DEPLOYMENT_BLOCK: int = 40499040
+
+
 # == Aerodrome Slipstream QuoterV2 ABI =========================================
 
 # NOTE: quoteExactInputSingle is nonpayable on-chain (uses state mutation + revert
