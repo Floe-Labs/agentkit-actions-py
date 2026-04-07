@@ -1,0 +1,89 @@
+"""Exported action count smoke test + parity gap tracker.
+
+The Python port is BEHIND the TypeScript port on exported action count:
+
+- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=6 = 36
+- Python agentkit-actions-py:  FloeActionProvider=23 + X402ActionProvider=6 = 29
+
+**Python is missing 7 actions that exist in TypeScript.** Known missing:
+  - instant_borrow         (credit facility — borrow + match in one call)
+  - repay_and_reborrow     (credit facility — renew credit line)
+  - (5 more — audit action_provider.py vs TS to enumerate)
+
+This test asserts the CURRENT Python state, not the TS target. When the
+Python port catches up, update the numbers here and close the gap.
+
+The docs at floe-labs-docs claim "36 actions" — that claim is TS-only.
+"""
+
+from __future__ import annotations
+
+from floe_agentkit_actions.action_provider import FloeActionProvider
+from floe_agentkit_actions.x402_action_provider import X402ActionProvider
+
+
+# If these numbers change, it means either:
+#   (a) Someone added a new action — bump the expected count and update
+#       floe-labs-docs if the combined total changed
+#   (b) Someone removed an action — investigate whether that was intentional
+FLOE_PROVIDER_ACTION_COUNT = 23
+X402_PROVIDER_ACTION_COUNT = 6
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 29
+
+# The TypeScript reference port. Gap = TS - Python. Close the gap by
+# porting the missing actions.
+TS_REFERENCE_TOTAL = 36
+PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 7
+
+
+def _count_actions(provider_cls) -> int:
+    """Instantiate the provider and count its exported actions.
+
+    coinbase-agentkit's @create_action decorator attaches metadata to
+    methods. The provider base class exposes them via get_actions().
+    """
+    from unittest.mock import MagicMock
+    provider = provider_cls()
+    wallet = MagicMock()
+    wallet.get_address = MagicMock(return_value="0x" + "11" * 20)
+    wallet.get_network = MagicMock(return_value=MagicMock(chain_id="8453"))
+    actions = provider.get_actions(wallet)
+    return len(actions)
+
+
+def test_floe_provider_exports_expected_action_count() -> None:
+    count = _count_actions(FloeActionProvider)
+    assert count == FLOE_PROVIDER_ACTION_COUNT, (
+        f"FloeActionProvider exports {count} actions, expected "
+        f"{FLOE_PROVIDER_ACTION_COUNT}. If this changed intentionally, update "
+        f"the constant and bump TOTAL_ACTION_COUNT."
+    )
+
+
+def test_x402_provider_exports_expected_action_count() -> None:
+    count = _count_actions(X402ActionProvider)
+    assert count == X402_PROVIDER_ACTION_COUNT, (
+        f"X402ActionProvider exports {count} actions, expected "
+        f"{X402_PROVIDER_ACTION_COUNT}."
+    )
+
+
+def test_total_action_count_matches_current_python_state() -> None:
+    total = _count_actions(FloeActionProvider) + _count_actions(X402ActionProvider)
+    assert total == TOTAL_ACTION_COUNT
+
+
+def test_python_port_parity_gap_is_documented() -> None:
+    """Live tracker: when the Python port catches up to TypeScript, this
+    test can be updated to assert PARITY_GAP == 0 and removed.
+
+    Until then, it documents the gap loudly so nobody thinks the Python
+    port has full parity with TS."""
+    total = _count_actions(FloeActionProvider) + _count_actions(X402ActionProvider)
+    gap = TS_REFERENCE_TOTAL - total
+    assert gap == PARITY_GAP, (
+        f"Parity gap between TS ({TS_REFERENCE_TOTAL}) and Python ({total}) "
+        f"is {gap}, expected {PARITY_GAP}. If the gap changed, update the "
+        f"constants AND floe-labs-docs if the user-facing count is affected."
+    )
+    assert gap == 0 or gap == PARITY_GAP, "unexpected parity state"

@@ -10,7 +10,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
-from coinbase_agentkit import ActionProvider, EvmWalletProvider, Network, create_action
+from coinbase_agentkit import ActionProvider, EvmWalletProvider, create_action
+from coinbase_agentkit.network import Network
 from web3 import Web3
 
 from .constants import (
@@ -206,7 +207,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         if int(current) >= required_amount:
             return None
         contract = _w3.eth.contract(abi=ERC20_ABI)
-        encoded = contract.encode_abi(fn_name="approve", args=[spender_address, required_amount])
+        encoded = contract.encode_abi("approve", args=[spender_address, required_amount])
         return wallet_provider.send_transaction(transaction={"to": token_address, "data": encoded})
 
     # ── grant_credit_delegation ────────────────────────────────────────────
@@ -248,8 +249,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             expiry_ts = int(time.time()) + int(args["expiry_days"]) * 86400
 
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi(
-                fn_name="setOperator",
+            encoded = contract.encode_abi("setOperator",
                 args=[args["facilitator_address"], borrow_limit_raw, max_rate_bps, expiry_ts, privy_wallet],
             )
             set_op_tx = wallet_provider.send_transaction(
@@ -313,7 +313,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def revoke_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi(fn_name="revokeOperator", args=[args["facilitator_address"]])
+            encoded = contract.encode_abi("revokeOperator", args=[args["facilitator_address"]])
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
             )
@@ -464,7 +464,13 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_get_transactions(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            limit = int(args.get("limit", "20"))
+            # Clamp limit to <=100 and default to 20 for non-numeric/negative/zero input.
+            # Mirrors the TypeScript port's commits 40cc356 / b4bcb3c.
+            try:
+                parsed = int(args.get("limit", "20"))
+                limit = min(parsed, 100) if parsed > 0 else 20
+            except (ValueError, TypeError):
+                limit = 20
             resp = self._facilitator_fetch(f"/agents/transactions?limit={limit}")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"

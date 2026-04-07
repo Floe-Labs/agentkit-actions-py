@@ -145,7 +145,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             return None
 
         contract = _w3.eth.contract(abi=ERC20_ABI)
-        encoded = contract.encode_abi(fn_name="approve", args=[spender_address, required_amount])
+        encoded = contract.encode_abi("approve", args=[spender_address, required_amount])
 
         tx_hash = wallet_provider.send_transaction(transaction={"to": token_address, "data": encoded})
 
@@ -743,7 +743,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(fn_name="registerLendIntent", args=[intent_struct])
+            encoded = contract.encode_abi("registerLendIntent", args=[intent_struct])
 
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
@@ -820,7 +820,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(fn_name="registerBorrowIntent", args=[intent_struct])
+            encoded = contract.encode_abi("registerBorrowIntent", args=[intent_struct])
 
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
@@ -922,8 +922,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(
-                fn_name="matchLoanIntents",
+            encoded = contract.encode_abi("matchLoanIntents",
                 args=[
                     lend_tuple,
                     b"",           # lenderSig (empty for on-chain intents)
@@ -1001,8 +1000,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(
-                fn_name="repayLoan",
+            encoded = contract.encode_abi("repayLoan",
                 args=[loan_id, repay_amount, max_total_repayment],
             )
 
@@ -1053,7 +1051,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(fn_name="addCollateral", args=[loan_id, amount])
+            encoded = contract.encode_abi("addCollateral", args=[loan_id, amount])
 
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
@@ -1095,7 +1093,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             coll_meta = resolve_token_meta(loan.collateralToken, wallet_provider)
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(fn_name="withdrawCollateral", args=[loan_id, amount])
+            encoded = contract.encode_abi("withdrawCollateral", args=[loan_id, amount])
 
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
@@ -1179,8 +1177,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             )
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
-            encoded = contract.encode_abi(
-                fn_name="liquidateLoan",
+            encoded = contract.encode_abi("liquidateLoan",
                 args=[loan_id, repay_amount, max_total_repayment],
             )
 
@@ -1421,8 +1418,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             else:
                 callback_bytes = callback_data if isinstance(callback_data, bytes) else bytes.fromhex(callback_data)
 
-            encoded = contract.encode_abi(
-                fn_name="flashLoan",
+            encoded = contract.encode_abi("flashLoan",
                 args=[args["token"], amount, callback_bytes],
             )
 
@@ -1515,8 +1511,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
 
             # Call executeArb on the FlashArbReceiver
             receiver_contract = _w3.eth.contract(abi=FLASH_ARB_RECEIVER_ABI)
-            encoded = receiver_contract.encode_abi(
-                fn_name="executeArb",
+            encoded = receiver_contract.encode_abi("executeArb",
                 args=[
                     args["token"],
                     amount,
