@@ -222,6 +222,101 @@ class TestRepayCredit:
         # Default slippage = 500 bps = 5%
         assert "5.00%" in result
 
+    def test_reverted_repay_returns_error_not_success(
+        self, provider: FloeActionProvider
+    ):
+        """Regression for round 5: if wait_for_transaction_receipt returns
+        a status=0 receipt (tx reverted), repay_credit must NOT claim
+        success — downstream callers like repay_and_reborrow would
+        otherwise proceed against a still-open loan."""
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", _build_active_loan())
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getAccruedInterest", (5 * 10**6, 86400))
+        wallet.mock_read(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "allowance",
+            2**256 - 1,
+        )
+        wallet.mock_send("0xrepayreverted")
+
+        # Override wait_for_transaction_receipt to simulate a reverted tx
+        wallet.wait_for_transaction_receipt = lambda tx: {  # type: ignore[method-assign]
+            "transactionHash": tx,
+            "status": 0,  # ← reverted
+        }
+
+        result = provider.repay_credit(wallet, {"loan_id": "1"})
+        assert "Credit Facility Repaid" not in result
+        assert "reverted" in result.lower()
+        assert "still open" in result.lower()
+
+    def test_receipt_wait_failure_surfaces_as_error(
+        self, provider: FloeActionProvider
+    ):
+        """Regression for round 5: if wait_for_transaction_receipt raises
+        (RPC error, timeout, etc.), repay_credit must surface a clear
+        'could not be confirmed' error — not silently report success."""
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", _build_active_loan())
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getAccruedInterest", (5 * 10**6, 86400))
+        wallet.mock_read(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "allowance",
+            2**256 - 1,
+        )
+        wallet.mock_send("0xrepaynorpc")
+
+        def raise_rpc_error(_tx: str) -> dict:
+            raise RuntimeError("RPC timeout")
+
+        wallet.wait_for_transaction_receipt = raise_rpc_error  # type: ignore[method-assign]
+
+        result = provider.repay_credit(wallet, {"loan_id": "1"})
+        assert "Credit Facility Repaid" not in result
+        assert "could not be confirmed" in result
+        assert "0xrepaynorpc" in result
+
+    def test_full_repay_includes_min_interest_penalty(
+        self, provider: FloeActionProvider
+    ):
+        """Regression for round 5: full-repay cap must include the
+        early-repayment penalty when the loan has nonzero minInterestBps
+        and is repaid before maturity. Without this, repayLoan() reverts
+        because the contract requires full_term_interest * minInterestBps /
+        BASIS_POINTS and the slippage cushion is too small.
+
+        Asserts via the Max Total Repayment line in the response: a loan
+        with 100% minInterestBps (= charge full-term interest even on
+        early repay) must show a max >= principal + full_term_interest.
+        """
+        wallet = MockWalletProvider()
+        loan = _build_active_loan()
+        loan.minInterestBps = 10000  # 100% of full-term interest
+        loan.interestRateBps = 500   # 5% APR
+        loan.duration = 365 * 24 * 60 * 60  # 1 year → full_term = principal * 5%
+        loan.principal = 1000 * 10**6  # 1000 USDC
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", loan)
+        # Only 1 USDC actually accrued (very early in the loan)
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getAccruedInterest", (1 * 10**6, 3600))
+        wallet.mock_read(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "allowance",
+            2**256 - 1,
+        )
+        wallet.mock_send("0xrepayminint")
+
+        result = provider.repay_credit(wallet, {"loan_id": "1"})
+        assert "Credit Facility Repaid" in result
+        # Without the minInterestBps fix, max total repayment would be
+        # ~1001 USDC (principal + 1 accrued + 5% slippage = ~1051).
+        # With the fix, it must include the ~50 USDC penalty (full term
+        # interest floor) → principal + 50 + 5% slippage ≈ 1102 USDC.
+        # The response formats Max Total Repayment via format_token_amount.
+        assert "Early Repay Penalty" in result
+        # Verify the penalty line appears: full_term (50 USDC) - accrued (1 USDC) ≈ 49 USDC
+        # format_token_amount with 2 decimals displays "49.00 USDC"
+        assert "49.00 USDC" in result
+
     def test_custom_slippage_passed_through(self, provider: FloeActionProvider):
         wallet = MockWalletProvider()
         wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", _build_active_loan())
@@ -450,6 +545,28 @@ class TestManualMatchCredit:
         args["duration"] = str(7 * 86400)  # 7 days, below lender's 30-day minimum
         result = provider.manual_match_credit(self._preflight_wallet(intent), args)
         assert "duration" in result
+
+    def test_preflight_rejects_disallowed_partial_fill(self, provider: FloeActionProvider):
+        """Regression for round 5: a lend intent with allowPartialFill=false
+        can only be matched by a borrow that fills it EXACTLY. Since
+        _build_borrow_struct always posts exact-fill (partial_fill=false),
+        any mismatch between borrow_amount and remaining must be rejected
+        before TX1."""
+        intent = _build_lend_intent(amount=5000 * 10**6)
+        intent.allowPartialFill = False
+        # remaining = 5000 USDC but caller requests 1000 USDC — incompatible
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "partial fills" in result
+        assert "match exactly" in result
+
+    def test_preflight_rejects_below_min_fill(self, provider: FloeActionProvider):
+        """Regression for round 5: borrow_amount below the lender's
+        minFillAmount must be rejected before TX1."""
+        intent = _build_lend_intent(amount=5000 * 10**6)
+        intent.minFillAmount = 2000 * 10**6  # lender requires at least 2000 USDC per fill
+        # Caller requests 1000 USDC — below min fill
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "minimum fill" in result
 
 
 class TestInstantBorrow:

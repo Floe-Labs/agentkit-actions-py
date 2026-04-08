@@ -2148,9 +2148,13 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
 
             loan_meta = resolve_token_meta(loan.loanToken, wallet_provider)
 
-            # Full repayment: repay_amount == principal
-            estimated_total = principal + interest_amount
-            max_total_repayment = estimated_total + (estimated_total * slippage_bps) // BASIS_POINTS
+            # Full repayment: repay_amount == principal. Cap includes the
+            # contract's early-repayment floor when minInterestBps > 0 and
+            # the loan is repaid before maturity — otherwise the cap can
+            # be smaller than what repayLoan() demands and the tx reverts.
+            estimated_total, max_total_repayment, early_repay_penalty = (
+                self._compute_full_repay_total(loan, interest_amount, slippage_bps)
+            )
 
             # Auto-approve loan token for the maximum we might be charged
             approval_result = self._ensure_allowance(
@@ -2172,16 +2176,37 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             # Wait for the repay to be mined before returning. Callers like
             # repay_and_reborrow otherwise race the next tx against a still-
             # in-flight repay and the reborrow phase can revert intermittently
-            # because the old loan isn't yet marked repaid on-chain and
-            # collateral hasn't been released. wait_for_transaction_receipt
-            # is a no-op-ish fast path on the mock wallet used in tests.
+            # because the old loan isn't yet marked repaid on-chain.
+            #
+            # If the receipt wait fails or the tx reverted, we must NOT
+            # report success — downstream callers (repay_and_reborrow)
+            # would then try to open a new facility against a still-open
+            # loan. Surface the failure as a clear error instead.
             try:
-                wallet_provider.wait_for_transaction_receipt(tx_hash)
-            except Exception:
-                # Non-fatal: receipt wait failure doesn't invalidate the
-                # repay — the tx is already submitted. Downstream callers
-                # can still observe state via getLoan.
-                pass
+                receipt = wallet_provider.wait_for_transaction_receipt(tx_hash)
+            except Exception as e:
+                return (
+                    f"Repay transaction submitted ({tx_hash}) but could not be confirmed: {e}. "
+                    "Check the transaction receipt before assuming the credit facility is closed."
+                )
+            receipt_status = None
+            if isinstance(receipt, dict):
+                receipt_status = receipt.get("status")
+            elif hasattr(receipt, "status"):
+                receipt_status = getattr(receipt, "status")
+            if receipt_status == 0:
+                return (
+                    f"Repay transaction {tx_hash} reverted on-chain. "
+                    f"The credit facility is still open. Check the loan state "
+                    f"via check_credit_status and retry with adjusted slippage."
+                )
+
+            penalty_line = ""
+            if early_repay_penalty > 0:
+                penalty_line = (
+                    f"\n- **Early Repay Penalty**: "
+                    f"{format_token_amount(early_repay_penalty, loan_meta['decimals'], loan_meta['symbol'])}"
+                )
 
             return "\n".join([
                 "## Credit Facility Repaid\n",
@@ -2189,7 +2214,8 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 f"- **Transaction**: {tx_hash}",
                 f"- **Loan ID**: {args['loan_id']}",
                 f"- **Principal Repaid**: {format_token_amount(principal, loan_meta['decimals'], loan_meta['symbol'])}",
-                f"- **Estimated Interest**: {format_token_amount(interest_amount, loan_meta['decimals'], loan_meta['symbol'])}",
+                f"- **Estimated Interest**: {format_token_amount(interest_amount, loan_meta['decimals'], loan_meta['symbol'])}"
+                + penalty_line,
                 f"- **Max Total Repayment (with {format_bps(slippage_bps)} slippage)**: {format_token_amount(max_total_repayment, loan_meta['decimals'], loan_meta['symbol'])}",
                 "",
                 "Credit facility is now closed. Collateral will be returned to your wallet on the next block.",
@@ -2198,6 +2224,51 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             return f"Error repaying credit facility: {e}"
 
     # ── Credit-facility helpers ───────────────────────────────────────────
+
+    def _compute_full_repay_total(
+        self,
+        loan: Any,
+        accrued_interest: int,
+        slippage_bps: int,
+    ) -> tuple[int, int, int]:
+        """Compute the estimated total and slippage-adjusted max for a full
+        principal repayment, accounting for the contract's min-interest floor.
+
+        Returns (estimated_total, max_total_repayment, early_repay_penalty).
+
+        Mirrors the early-repayment penalty math from check_credit_status:
+        if the loan has a nonzero minInterestBps and is repaid BEFORE
+        maturity, the contract requires at least
+            full_term_interest * minInterestBps / BASIS_POINTS
+        of interest, even if the actually-accrued interest is lower. Failing
+        to include this in the slippage cushion makes repayLoan() revert on
+        any loan with a non-trivial minInterestBps when repaid early.
+        """
+        principal = int(loan.principal)
+        rate_bps = int(loan.interestRateBps)
+        duration = int(loan.duration)
+        start_time = int(loan.startTime)
+        min_int_bps = int(getattr(loan, "minInterestBps", 0))
+
+        # Full-term interest at the loan's fixed rate (simple interest
+        # per second, matching the contract's accrual formula).
+        full_term_interest = (
+            principal * rate_bps * duration
+        ) // (BASIS_POINTS * 365 * 24 * 60 * 60)
+
+        early_repay_penalty = 0
+        now = int(time.time())
+        is_past_maturity = now >= start_time + duration
+        if not is_past_maturity and min_int_bps > 0:
+            min_required = (full_term_interest * min_int_bps) // BASIS_POINTS
+            if min_required > accrued_interest:
+                early_repay_penalty = min_required - accrued_interest
+
+        estimated_total = principal + accrued_interest + early_repay_penalty
+        max_total_repayment = (
+            estimated_total + (estimated_total * slippage_bps) // BASIS_POINTS
+        )
+        return estimated_total, max_total_repayment, early_repay_penalty
 
     def _get_public_client(self) -> Web3:
         """Lazy Web3 HTTP client for event log scanning. Requires rpc_url."""
@@ -2326,6 +2397,26 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             return (
                 f"Lend intent only has {remaining} remaining (raw units), "
                 f"but you requested {borrow_amount}."
+            )
+
+        # Exact-fill constraint: _build_borrow_struct always posts
+        # min_fill_amount == borrow_amount with allow_partial_fill=False,
+        # so a lend intent that disallows partial fills can only accept a
+        # borrow EQUAL to its remaining amount. A lend intent with
+        # minFillAmount > borrow_amount also can't accept this request.
+        # Without these checks, the borrow intent registers on-chain
+        # (TX1) and matchLoanIntents reverts on TX2, wasting gas.
+        allow_partial = bool(getattr(lend_intent, "allowPartialFill", True))
+        if not allow_partial and borrow_amount != remaining:
+            return (
+                f"Lend intent does not allow partial fills; requested {borrow_amount} "
+                f"but remaining amount is {remaining} (must match exactly)."
+            )
+        min_fill = int(getattr(lend_intent, "minFillAmount", 0))
+        if borrow_amount < min_fill:
+            return (
+                f"Requested borrow_amount ({borrow_amount}) is below the lend intent's "
+                f"minimum fill ({min_fill})."
             )
 
         if int(lend_intent.minInterestRateBps) > max_rate_bps:
@@ -2692,9 +2783,13 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             loan_meta = resolve_token_meta(old_loan.loanToken, wallet_provider)
             principal = int(old_loan.principal)
             interest_amount = int(interest_data[0])
-            estimated_total = principal + interest_amount
-            max_total_repayment = (
-                estimated_total + (estimated_total * slippage_bps) // BASIS_POINTS
+            # Use the shared full-repay helper so the minInterestBps
+            # early-repayment penalty is included in the slippage cap.
+            # Same rationale as in repay_credit — without this, loans
+            # with nonzero minInterestBps repaid before maturity would
+            # revert on the cap being smaller than the contract's floor.
+            _, max_total_repayment, _ = self._compute_full_repay_total(
+                old_loan, interest_amount, slippage_bps
             )
             repay_approval = self._ensure_allowance(
                 wallet_provider,
@@ -2709,7 +2804,26 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             repay_tx = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": repay_data}
             )
-            wallet_provider.wait_for_transaction_receipt(repay_tx)
+            # Fail-hard on a reverted or unconfirmable repay — do NOT
+            # proceed to open a new credit line against a still-open loan.
+            try:
+                repay_receipt = wallet_provider.wait_for_transaction_receipt(repay_tx)
+            except Exception as e:
+                return (
+                    f"Repay transaction submitted ({repay_tx}) but could not be confirmed: {e}. "
+                    "New credit facility was NOT opened. Check the repay receipt before retrying."
+                )
+            repay_status = None
+            if isinstance(repay_receipt, dict):
+                repay_status = repay_receipt.get("status")
+            elif hasattr(repay_receipt, "status"):
+                repay_status = getattr(repay_receipt, "status")
+            if repay_status == 0:
+                return (
+                    f"Repay transaction {repay_tx} reverted on-chain. "
+                    f"The old credit facility is still open and no new facility was opened. "
+                    f"Retry with adjusted slippage."
+                )
 
             # ── Phase 2: open new credit facility ──
             try:

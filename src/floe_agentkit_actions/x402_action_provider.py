@@ -245,6 +245,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
                 max_rate_bps = int(args["max_rate_bps"])
                 expiry_days = int(args["expiry_days"])
+            except KeyError as e:
+                return f"Invalid delegation input: missing required field {e.args[0]!r}"
             except (InvalidOperation, TypeError, ValueError) as e:
                 return f"Invalid delegation input: {e}"
             if borrow_limit_decimal <= 0:
@@ -264,6 +266,18 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 )
             borrow_limit_raw = int(scaled)
             expiry_ts = int(time.time()) + expiry_days * 86400
+            # Bound-check against uint256 before encoding calldata. Python's
+            # arbitrary-precision int otherwise lets oversized inputs through
+            # local validation only to fail later at ABI encode time with a
+            # less-actionable error. All three fields are uint256 in OPERATOR_ABI.
+            max_uint256 = (1 << 256) - 1
+            for field_name, value in (
+                ("borrow_limit", borrow_limit_raw),
+                ("max_rate_bps", max_rate_bps),
+                ("expiry", expiry_ts),
+            ):
+                if value > max_uint256:
+                    return f"{field_name} is too large for uint256 ({value})."
 
             agent_address = wallet_provider.get_address()
             facilitator_url = args["facilitator_url"]
