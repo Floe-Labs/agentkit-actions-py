@@ -1,19 +1,20 @@
-"""Exported action count smoke test + parity gap tracker.
+"""Exported action count smoke test.
 
-The Python port is BEHIND the TypeScript port on exported action count:
+Validates that both providers export the expected number of actions, and
+asserts that the Python port remains at full parity with the TypeScript
+reference (`agentkit-actions`).
+
+Current state (commit 854fd92, April 2026):
 
 - TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=6 = 36
-- Python agentkit-actions-py:  FloeActionProvider=23 + X402ActionProvider=6 = 29
+- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=6 = 36
 
-**Python is missing 7 actions that exist in TypeScript.** Known missing:
-  - instant_borrow         (credit facility — borrow + match in one call)
-  - repay_and_reborrow     (credit facility — renew credit line)
-  - (5 more — audit action_provider.py vs TS to enumerate)
+Parity achieved — PARITY_GAP = 0.
 
-This test asserts the CURRENT Python state, not the TS target. When the
-Python port catches up, update the numbers here and close the gap.
-
-The docs at floe-labs-docs claim "36 actions" — that claim is TS-only.
+If either provider's action count changes, update the constants below.
+If parity breaks (Python drifts behind TypeScript), fix the port — do not
+just bump PARITY_GAP to hide the drift. The docs at floe-labs-docs claim
+"36 actions in both TypeScript and Python" — keep that true.
 """
 
 from __future__ import annotations

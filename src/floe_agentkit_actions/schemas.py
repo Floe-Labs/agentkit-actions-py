@@ -56,10 +56,9 @@ class GetMarketsSchema(BaseModel):
     @field_validator("market_ids")
     @classmethod
     def validate_market_ids(cls, v: Optional[list[str]]) -> Optional[list[str]]:
-        if v is not None:
-            for item in v:
-                _validate_bytes32(item)
-        return v
+        if v is None:
+            return v
+        return [_validate_bytes32(item) for item in v]
 
 
 class GetLoanSchema(BaseModel):
@@ -288,9 +287,9 @@ class PostBorrowIntentSchema(BaseModel):
     @field_validator("on_behalf_of")
     @classmethod
     def validate_on_behalf_of(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 class MatchIntentsSchema(BaseModel):
@@ -513,9 +512,9 @@ class FlashArbSchema(BaseModel):
     @field_validator("token", "receiver_address")
     @classmethod
     def validate_address(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 class GetFlashArbBalanceSchema(BaseModel):
@@ -532,9 +531,9 @@ class GetFlashArbBalanceSchema(BaseModel):
     @field_validator("token", "receiver_address")
     @classmethod
     def validate_address(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 # ===========================================================================
@@ -560,9 +559,9 @@ class CheckFlashArbReadinessSchema(BaseModel):
     @field_validator("receiver_address")
     @classmethod
     def validate_receiver_address(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 # ── Credit facility actions (TS parity port — Phase A) ────────────────────
@@ -617,9 +616,7 @@ class RequestCreditSchema(BaseModel):
     @field_validator("market_id")
     @classmethod
     def validate_market_id(cls, v: str) -> str:
-        if not v.startswith("0x") or len(v) != 66:
-            raise ValueError("market_id must be a 0x-prefixed bytes32 (66 chars)")
-        return v
+        return _validate_bytes32(v)
 
 
 class ManualMatchCreditSchema(BaseModel):
@@ -646,13 +643,25 @@ class ManualMatchCreditSchema(BaseModel):
         default="300",
         description="Borrow intent validity in seconds (default: 300 = 5 min).",
     )
+    on_behalf_of: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional address to receive borrowed USDC. If omitted, sent to "
+            "your wallet."
+        ),
+    )
 
     @field_validator("lend_intent_hash", "market_id")
     @classmethod
     def validate_bytes32(cls, v: str) -> str:
-        if not v.startswith("0x") or len(v) != 66:
-            raise ValueError("must be a 0x-prefixed bytes32 (66 chars)")
-        return v
+        return _validate_bytes32(v)
+
+    @field_validator("on_behalf_of")
+    @classmethod
+    def validate_on_behalf(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 class RenewCreditLineSchema(BaseModel):
@@ -677,9 +686,7 @@ class RenewCreditLineSchema(BaseModel):
     @field_validator("lend_intent_hash", "market_id")
     @classmethod
     def validate_bytes32(cls, v: str) -> str:
-        if not v.startswith("0x") or len(v) != 66:
-            raise ValueError("must be a 0x-prefixed bytes32 (66 chars)")
-        return v
+        return _validate_bytes32(v)
 
 
 class InstantBorrowSchema(BaseModel):
@@ -699,16 +706,14 @@ class InstantBorrowSchema(BaseModel):
     @field_validator("market_id")
     @classmethod
     def validate_market_id(cls, v: str) -> str:
-        if not v.startswith("0x") or len(v) != 66:
-            raise ValueError("market_id must be a 0x-prefixed bytes32 (66 chars)")
-        return v
+        return _validate_bytes32(v)
 
     @field_validator("on_behalf_of")
     @classmethod
     def validate_on_behalf(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 class RepayAndReborrowSchema(BaseModel):
@@ -743,9 +748,9 @@ class RepayAndReborrowSchema(BaseModel):
     @field_validator("on_behalf_of")
     @classmethod
     def validate_on_behalf(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
 
 
 class VerifyFlashArbReceiverSchema(BaseModel):
@@ -763,6 +768,6 @@ class VerifyFlashArbReceiverSchema(BaseModel):
     @field_validator("receiver_address")
     @classmethod
     def validate_receiver_address(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            _validate_address(v)
-        return v
+        if v is None:
+            return v
+        return _validate_address(v)
