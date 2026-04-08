@@ -2164,6 +2164,19 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
             )
+            # Wait for the repay to be mined before returning. Callers like
+            # repay_and_reborrow otherwise race the next tx against a still-
+            # in-flight repay and the reborrow phase can revert intermittently
+            # because the old loan isn't yet marked repaid on-chain and
+            # collateral hasn't been released. wait_for_transaction_receipt
+            # is a no-op-ish fast path on the mock wallet used in tests.
+            try:
+                wallet_provider.wait_for_transaction_receipt(tx_hash)
+            except Exception:
+                # Non-fatal: receipt wait failure doesn't invalidate the
+                # repay — the tx is already submitted. Downstream callers
+                # can still observe state via getLoan.
+                pass
 
             return "\n".join([
                 "## Credit Facility Repaid\n",
@@ -2641,7 +2654,13 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                         "expiry_seconds": "300",
                     },
                 )
-                if new_result.startswith("Error") or "not found on-chain" in new_result:
+                # Check for SUCCESS marker rather than blacklisting known
+                # failure prefixes. manual_match_credit can return several
+                # non-success strings that don't start with "Error"
+                # (e.g. "Lend intent only has X remaining" or "not found
+                # on-chain"); the success path always begins with
+                # "## Credit Facility Opened".
+                if not new_result.startswith("## Credit Facility Opened"):
                     raise RuntimeError(new_result)
             except Exception as match_err:
                 return "\n".join([
@@ -2794,7 +2813,12 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 borrow_args["on_behalf_of"] = args["on_behalf_of"]
             new_result = self.instant_borrow(wallet_provider, borrow_args)
 
-            if new_result.startswith("Error") or new_result.startswith("No matching"):
+            # Check for SUCCESS marker rather than blacklisting known failure
+            # prefixes. instant_borrow surfaces several non-success strings
+            # ("No matching liquidity...", "Error ...", errors bubbled up from
+            # manual_match_credit like "Lend intent only has X remaining").
+            # Success always begins with "## Credit Facility Opened".
+            if not new_result.startswith("## Credit Facility Opened"):
                 return "\n".join([
                     "## Credit Line -- Partial Renewal\n",
                     "### Old Loan Repaid",

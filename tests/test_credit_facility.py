@@ -1,13 +1,22 @@
-"""Tests for the credit-facility actions ported from TS agentkit (Phase A).
+"""Tests for the credit-facility actions ported from TS agentkit.
 
-Phase A scope: check_credit_status, repay_credit. Both reuse existing
-helpers (resolve_token_meta, _ensure_allowance) and existing matcher
-read paths (getLoan, getCurrentLtvBps, isHealthy, getAccruedInterest).
+Covers all 7 credit-facility actions now at parity with the TS port
+(closed in commit 854fd92):
 
-Phase A.2 (request_credit, manual_match_credit, renew_credit_line) and
-Phase B (instant_borrow, repay_and_reborrow) are tracked separately —
-they require new infrastructure (RPC client + event log scanning, or
-the floe-credit-sdk Python adapter respectively).
+- check_credit_status, repay_credit       — reuse existing helpers
+                                            (resolve_token_meta,
+                                            _ensure_allowance) and matcher
+                                            reads (getLoan, isHealthy,
+                                            getAccruedInterest, etc.)
+- request_credit, manual_match_credit,    — use the RPC event-log scan
+  renew_credit_line                         path (_scan_available_lend_intents)
+                                            and two/three-tx flows
+- instant_borrow, repay_and_reborrow      — compose the above; also
+                                            cover the on_behalf_of
+                                            threading regression
+
+Tests here monkey-patch _scan_available_lend_intents in a few places
+to avoid needing a live RPC endpoint.
 """
 
 from __future__ import annotations

@@ -258,6 +258,11 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
             except (InvalidOperation, ValueError) as e:
                 return f"Invalid borrow_limit '{args['borrow_limit']}': {e}"
+            if borrow_limit_decimal <= 0:
+                return (
+                    f"borrow_limit must be positive, got '{args['borrow_limit']}'. "
+                    "A zero or negative credit line cannot be delegated."
+                )
             scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
             if scaled != scaled.to_integral_value():
                 return (
