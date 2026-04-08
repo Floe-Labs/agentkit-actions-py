@@ -61,6 +61,7 @@ def _build_active_loan(
     loan.collateralAmount = 10**18
     loan.gracePeriod = 86400
     loan.minInterestBps = 0
+    loan.marketId = b"\x11" * 32
     return loan
 
 
@@ -483,3 +484,207 @@ class TestRepayAndReborrow:
         wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", loan)
         result = provider.repay_and_reborrow(wallet, {"loan_id": "1"})
         assert "already repaid" in result
+
+
+# ── on_behalf_of threading (regression for Copilot #2/#3/#4) ───────────────
+#
+# These tests lock down that the credit-facility actions forward the
+# caller-supplied `on_behalf_of` into the BorrowIntent struct instead of
+# hardcoding it to the caller's own address. The schemas advertise the
+# field; silently ignoring it would be a misleading API.
+#
+# Strategy: monkey-patch `_build_borrow_struct` to capture the kwargs it
+# receives, then assert the captured value matches the expected recipient.
+# We short-circuit the rest of the flow by returning a deterministic tuple
+# so the txs can still be encoded and sent without errors.
+
+
+_RECIPIENT_ALICE = "0x4200000000000000000000000000000000000006"  # WETH — known checksum-safe
+# Use known checksum-valid addresses — web3.py encode_abi rejects
+# non-checksummed mixed-case hex at serialization time.
+_DUMMY_BORROW_TUPLE = (
+    "0x4200000000000000000000000000000000000006",  # borrower (WETH addr, all-digit so checksum-safe)
+    _RECIPIENT_ALICE,                                # on_behalf_of (all-uppercase is checksum-safe)
+    1000 * 10**6,                                    # borrow_amount
+    10**18,                                          # collateral_amount
+    1000 * 10**6,                                    # min_fill_amount
+    1000,                                            # max_rate_bps
+    7000,                                            # min_ltv_bps
+    604800,                                          # min_duration
+    604800,                                          # max_duration
+    False,                                           # allow_partial_fill
+    0,                                               # valid_from_timestamp
+    50,                                              # matcher_commission_bps
+    1_999_999_999,                                   # expiry
+    b"\x11" * 32,                                    # market_id
+    b"\x22" * 32,                                    # salt
+    [],                                              # conditions
+    [],                                              # pre_hooks
+    [],                                              # post_hooks
+)
+
+
+class TestOnBehalfOfPropagation:
+    """Regression: on_behalf_of must flow into _build_borrow_struct."""
+
+    def _spy(self, provider: FloeActionProvider, monkeypatch) -> dict:
+        """Replace _build_borrow_struct with a capturing stub."""
+        captured: dict = {}
+        real = provider._build_borrow_struct
+
+        def stub(**kwargs):
+            captured.update(kwargs)
+            # Return a valid-shape tuple so the rest of the flow
+            # (encode_abi, send_transaction) doesn't error.
+            return _DUMMY_BORROW_TUPLE
+
+        monkeypatch.setattr(provider, "_build_borrow_struct", stub)
+        return captured
+
+    def test_manual_match_credit_threads_on_behalf_of(
+        self, provider: FloeActionProvider, monkeypatch
+    ):
+        captured = self._spy(provider, monkeypatch)
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getOnChainLendIntent", _build_lend_intent()
+        )
+        wallet.mock_read(
+            "0x4200000000000000000000000000000000000006", "allowance", 2**256 - 1
+        )
+        wallet.mock_send("0xregister")
+        wallet.mock_send("0xmatch")
+
+        result = provider.manual_match_credit(
+            wallet,
+            {
+                "lend_intent_hash": _LEND_HASH,
+                "borrow_amount": str(1000 * 10**6),
+                "collateral_amount": str(10**18),
+                "max_interest_rate_bps": "1000",
+                "min_ltv_bps": "7000",
+                "duration": "604800",
+                "market_id": _MARKET_ID,
+                "on_behalf_of": _RECIPIENT_ALICE,
+            },
+        )
+        assert "Credit Facility Opened" in result
+        assert captured["on_behalf_of"] == _RECIPIENT_ALICE
+        # Borrower is still the caller (wallet owner), not the recipient
+        assert captured["borrower"] == wallet.get_address()
+
+    def test_manual_match_credit_defaults_to_caller_when_omitted(
+        self, provider: FloeActionProvider, monkeypatch
+    ):
+        captured = self._spy(provider, monkeypatch)
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getOnChainLendIntent", _build_lend_intent()
+        )
+        wallet.mock_read(
+            "0x4200000000000000000000000000000000000006", "allowance", 2**256 - 1
+        )
+        wallet.mock_send("0xregister")
+        wallet.mock_send("0xmatch")
+
+        provider.manual_match_credit(
+            wallet,
+            {
+                "lend_intent_hash": _LEND_HASH,
+                "borrow_amount": str(1000 * 10**6),
+                "collateral_amount": str(10**18),
+                "max_interest_rate_bps": "1000",
+                "min_ltv_bps": "7000",
+                "duration": "604800",
+                "market_id": _MARKET_ID,
+                # on_behalf_of omitted
+            },
+        )
+        # Default: on_behalf_of falls back to the caller's address
+        assert captured["on_behalf_of"] == wallet.get_address()
+
+    def test_instant_borrow_threads_on_behalf_of(
+        self, provider: FloeActionProvider, monkeypatch
+    ):
+        captured = self._spy(provider, monkeypatch)
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getOnChainLendIntent", _build_lend_intent(rate_bps=300)
+        )
+        wallet.mock_read(
+            "0x4200000000000000000000000000000000000006", "allowance", 2**256 - 1
+        )
+        wallet.mock_send("0xregister")
+        wallet.mock_send("0xmatch")
+        offers = [
+            {"hash": "0x" + "aa" * 32, "intent": _build_lend_intent(rate_bps=300)},
+        ]
+        monkeypatch.setattr(
+            provider, "_scan_available_lend_intents", lambda w, m: offers
+        )
+
+        result = provider.instant_borrow(
+            wallet,
+            {
+                "market_id": _MARKET_ID,
+                "borrow_amount": str(1000 * 10**6),
+                "collateral_amount": str(10**18),
+                "max_interest_rate_bps": "1000",
+                "duration": "604800",
+                "on_behalf_of": _RECIPIENT_ALICE,
+            },
+        )
+        assert "Credit Facility Opened" in result
+        assert captured["on_behalf_of"] == _RECIPIENT_ALICE
+
+    def test_repay_and_reborrow_threads_on_behalf_of(
+        self, provider: FloeActionProvider, monkeypatch
+    ):
+        captured = self._spy(provider, monkeypatch)
+        wallet = MockWalletProvider()
+
+        # Step 1: old loan state for repay_credit
+        old_loan = _build_active_loan()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", old_loan)
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getAccruedInterest", (5 * 10**6, 86400)
+        )
+        wallet.mock_read(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC allowance
+            "allowance",
+            2**256 - 1,
+        )
+        # Step 2: market + lend intent for the new borrow
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getOnChainLendIntent", _build_lend_intent(rate_bps=300)
+        )
+        wallet.mock_read(
+            "0x4200000000000000000000000000000000000006",  # WETH allowance
+            "allowance",
+            2**256 - 1,
+        )
+        # Three txs: repay, register, match
+        wallet.mock_send("0xrepay")
+        wallet.mock_send("0xregister")
+        wallet.mock_send("0xmatch")
+
+        offers = [
+            {"hash": "0x" + "aa" * 32, "intent": _build_lend_intent(rate_bps=300)},
+        ]
+        monkeypatch.setattr(
+            provider, "_scan_available_lend_intents", lambda w, m: offers
+        )
+
+        result = provider.repay_and_reborrow(
+            wallet,
+            {
+                "loan_id": "1",
+                "on_behalf_of": _RECIPIENT_ALICE,
+            },
+        )
+        assert "Credit Line Renewed" in result
+        assert captured["on_behalf_of"] == _RECIPIENT_ALICE
