@@ -142,6 +142,13 @@ class FloeConfig:
     # only when explicitly opted in via Web3 default; production deployments
     # should set this to an Alchemy/Infura/etc URL to avoid rate limits.
     rpc_url: Optional[str] = None
+    # How many blocks back to scan for LogLenderOfferPosted events when
+    # browsing available credit offers (request_credit, instant_borrow).
+    # Default ~7 days on Base (~2s blocks) — long enough to find real open
+    # offers, short enough to stay well inside Alchemy eth_getLogs range
+    # limits and keep response times bounded as protocol usage grows.
+    # Set to None to scan from matcher deployment block (legacy behavior).
+    offer_scan_lookback_blocks: Optional[int] = 300_000
 
 
 @dataclass

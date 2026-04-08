@@ -6,6 +6,7 @@ import json
 import re
 import time
 import secrets
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -182,7 +183,11 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return {"status": resp.status, "body": json.loads(resp.read()), "headers": {k.lower(): v for k, v in resp.headers.items()}}
+                return {
+                    "status": resp.status,
+                    "body": json.loads(resp.read()),
+                    "headers": {k.lower(): v for k, v in resp.headers.items()},
+                }
         except urllib.error.HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             try:
@@ -243,8 +248,23 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             privy_wallet = pre_reg["body"]["privyWalletAddress"]
 
             # Step 2: setOperator
+            # Precise decimal→USDC raw conversion. Parsing via float is a
+            # money-math bug: `int(float("1.5")) == 1` silently drops $0.50,
+            # and larger amounts can lose more to float rounding. Use Decimal
+            # end-to-end so fractional inputs like "1500.25" produce
+            # 1_500_250_000 raw units exactly.
             usdc_decimals = 6
-            borrow_limit_raw = int(float(args["borrow_limit"])) * (10 ** usdc_decimals)
+            try:
+                borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
+            except (InvalidOperation, ValueError) as e:
+                return f"Invalid borrow_limit '{args['borrow_limit']}': {e}"
+            scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
+            if scaled != scaled.to_integral_value():
+                return (
+                    f"borrow_limit '{args['borrow_limit']}' has more precision than "
+                    f"USDC supports ({usdc_decimals} decimals). Reduce the precision."
+                )
+            borrow_limit_raw = int(scaled)
             max_rate_bps = int(args["max_rate_bps"])
             expiry_ts = int(time.time()) + int(args["expiry_days"]) * 86400
 

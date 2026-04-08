@@ -4,10 +4,12 @@ struct that gets encoded and sent to registerBorrowIntent.
 Mirrors agentkit-actions (TypeScript) commit b69b483 which threaded
 onBehalfOf through instant_borrow / repay_and_reborrow / post_borrow_intent.
 
-NOTE: The Python port only has `post_borrow_intent` exposed today — it is
-MISSING `instant_borrow` and `repay_and_reborrow` which the TS port has.
-See test_action_count.py for the full parity gap. This file only covers
-what exists.
+The Python port exposes `post_borrow_intent`, `manual_match_credit`,
+`instant_borrow`, and `repay_and_reborrow`, all of which accept an
+optional `on_behalf_of`. This test file focuses on the
+registerBorrowIntent encoding path used by `post_borrow_intent` —
+the credit-facility actions reuse the same `_build_borrow_struct`
+helper, so coverage here transitively exercises them too.
 """
 
 from __future__ import annotations

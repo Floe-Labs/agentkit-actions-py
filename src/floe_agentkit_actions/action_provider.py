@@ -113,6 +113,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
         self._views_address: str = cfg.lending_views_address or BASE_MAINNET_VIEWS
         self._known_market_ids: list[str] = cfg.known_market_ids or []
         self._rpc_url: Optional[str] = cfg.rpc_url
+        self._offer_scan_lookback_blocks: Optional[int] = cfg.offer_scan_lookback_blocks
         self._deployed_receiver_address: Optional[str] = None
         self._public_client: Optional[Web3] = None
 
@@ -2201,6 +2202,13 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
 
         Returns list of {hash, intent} for offers that are unrevoked, partially
         unfilled, and unexpired. Intended to be monkey-patched in tests.
+
+        Scan window: by default, looks back `FloeConfig.offer_scan_lookback_blocks`
+        blocks from head (default ~7 days on Base). This keeps the query
+        bounded so it stays inside Alchemy/Infura eth_getLogs range limits
+        and response times don't grow with protocol usage. Set the config
+        value to None to scan from matcher deployment block (legacy behavior
+        — will hit RPC limits as history grows).
         """
         client = self._get_public_client()
         contract = client.eth.contract(
@@ -2208,8 +2216,18 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             abi=LOG_LENDER_OFFER_POSTED_EVENT,
         )
         market_id_bytes = bytes.fromhex(market_id[2:])
+
+        if self._offer_scan_lookback_blocks is None:
+            from_block: int = MATCHER_DEPLOYMENT_BLOCK
+        else:
+            latest = client.eth.block_number
+            from_block = max(
+                MATCHER_DEPLOYMENT_BLOCK,
+                latest - self._offer_scan_lookback_blocks,
+            )
+
         logs = contract.events.LogLenderOfferPosted.get_logs(
-            from_block=MATCHER_DEPLOYMENT_BLOCK,
+            from_block=from_block,
             to_block="latest",
             argument_filters={"marketId": market_id_bytes},
         )
@@ -2261,7 +2279,15 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
         return "0x" + secrets.token_hex(32)
 
     def _lend_intent_to_tuple(self, lend_intent: Any) -> tuple:
-        """Convert a getOnChainLendIntent result into the ABI tuple ordering."""
+        """Convert a getOnChainLendIntent result into the ABI tuple ordering.
+
+        Preserves `conditions`, `preHooks`, and `postHooks` from the on-chain
+        struct — hardcoding them to empty arrays would produce a different
+        tuple than what was originally posted, causing `matchLoanIntents` to
+        revert on any intent that carries hooks (the matcher verifies the
+        tuple hash against the stored one). Mirrors the pattern used in
+        `match_intents` a few hundred lines above.
+        """
         market_id = lend_intent.marketId
         if isinstance(market_id, str) and market_id.startswith("0x"):
             market_id = bytes.fromhex(market_id[2:])
@@ -2285,9 +2311,9 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             salt,
             int(lend_intent.gracePeriod),
             int(lend_intent.minInterestBps),
-            [],
-            [],
-            [],
+            list(lend_intent.conditions) if hasattr(lend_intent, 'conditions') else [],
+            list(lend_intent.preHooks) if hasattr(lend_intent, 'preHooks') else [],
+            list(lend_intent.postHooks) if hasattr(lend_intent, 'postHooks') else [],
         )
 
     def _build_borrow_struct(
@@ -2441,6 +2467,9 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             duration = int(args["duration"])
             matcher_commission_bps = int(args.get("matcher_commission_bps", "50"))
             expiry_seconds = int(args.get("expiry_seconds", "300"))
+            # Optional proceeds recipient — mirrors post_borrow_intent. If
+            # omitted, borrowed USDC lands in the caller's own wallet.
+            on_behalf_of = args.get("on_behalf_of") or user
             now = int(time.time())
             expiry = now + expiry_seconds
             salt = self._random_salt()
@@ -2486,7 +2515,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
 
             borrow_struct = self._build_borrow_struct(
                 borrower=user,
-                on_behalf_of=user,
+                on_behalf_of=on_behalf_of,
                 borrow_amount=borrow_amount,
                 collateral_amount=collateral_amount,
                 max_rate_bps=max_rate_bps,
@@ -2684,20 +2713,23 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             compatible.sort(key=lambda e: int(e["intent"].minInterestRateBps))
             best = compatible[0]
 
-            return self.manual_match_credit(
-                wallet_provider,
-                {
-                    "lend_intent_hash": best["hash"],
-                    "borrow_amount": args["borrow_amount"],
-                    "collateral_amount": args["collateral_amount"],
-                    "max_interest_rate_bps": args["max_interest_rate_bps"],
-                    "min_ltv_bps": args.get("min_ltv_bps", "8000"),
-                    "duration": args["duration"],
-                    "market_id": market_id,
-                    "matcher_commission_bps": "50",
-                    "expiry_seconds": "300",
-                },
-            )
+            match_args: dict[str, Any] = {
+                "lend_intent_hash": best["hash"],
+                "borrow_amount": args["borrow_amount"],
+                "collateral_amount": args["collateral_amount"],
+                "max_interest_rate_bps": args["max_interest_rate_bps"],
+                "min_ltv_bps": args.get("min_ltv_bps", "8000"),
+                "duration": args["duration"],
+                "market_id": market_id,
+                "matcher_commission_bps": "50",
+                "expiry_seconds": "300",
+            }
+            # Thread on_behalf_of through when the caller supplied one — the
+            # schema advertises it and silently ignoring it would be a
+            # misleading API contract.
+            if args.get("on_behalf_of") is not None:
+                match_args["on_behalf_of"] = args["on_behalf_of"]
+            return self.manual_match_credit(wallet_provider, match_args)
         except Exception as e:
             return f"Error in instant borrow: {e}"
 
@@ -2748,17 +2780,19 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             duration = args.get("duration") or str(int(old_loan.duration))
             market_id = "0x" + old_loan.marketId.hex() if isinstance(old_loan.marketId, (bytes, bytearray)) else old_loan.marketId
 
-            new_result = self.instant_borrow(
-                wallet_provider,
-                {
-                    "market_id": market_id,
-                    "borrow_amount": borrow_amount,
-                    "collateral_amount": collateral_amount,
-                    "max_interest_rate_bps": max_rate,
-                    "duration": duration,
-                    "min_ltv_bps": "8000",
-                },
-            )
+            borrow_args: dict[str, Any] = {
+                "market_id": market_id,
+                "borrow_amount": borrow_amount,
+                "collateral_amount": collateral_amount,
+                "max_interest_rate_bps": max_rate,
+                "duration": duration,
+                "min_ltv_bps": "8000",
+            }
+            # Thread on_behalf_of through — RepayAndReborrowSchema advertises
+            # it and silently ignoring it would be misleading.
+            if args.get("on_behalf_of") is not None:
+                borrow_args["on_behalf_of"] = args["on_behalf_of"]
+            new_result = self.instant_borrow(wallet_provider, borrow_args)
 
             if new_result.startswith("Error") or new_result.startswith("No matching"):
                 return "\n".join([
