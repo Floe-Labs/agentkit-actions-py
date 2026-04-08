@@ -393,6 +393,64 @@ class TestManualMatchCredit:
         )
         assert "remaining" in result
 
+    # ── Preflight compatibility regressions ───────────────────────────────
+    # Verify that manual_match_credit rejects each class of incompatible
+    # offer BEFORE sending TX1 (registerBorrowIntent). Without these
+    # preflight checks, TX1 would land on-chain and burn gas before TX2
+    # (matchLoanIntents) reverts with a cryptic error.
+
+    def _base_args(self) -> dict:
+        return {
+            "lend_intent_hash": _LEND_HASH,
+            "borrow_amount": str(1000 * 10**6),
+            "collateral_amount": str(10**18),
+            "max_interest_rate_bps": "1000",
+            "min_ltv_bps": "7000",
+            "duration": "604800",
+            "market_id": _MARKET_ID,
+        }
+
+    def _preflight_wallet(self, intent) -> MockWalletProvider:
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getOnChainLendIntent", intent)
+        # Should NEVER reach send_transaction on these paths — preflight
+        # rejects before TX1. If any of these tests fails via "no mock send
+        # response", it means the preflight let the request through.
+        return wallet
+
+    def test_preflight_rejects_wrong_market(self, provider: FloeActionProvider):
+        intent = _build_lend_intent()
+        intent.marketId = b"\x99" * 32  # different market than _MARKET_ID
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "belongs to market" in result
+
+    def test_preflight_rejects_future_valid_from(self, provider: FloeActionProvider):
+        import time as _t
+        intent = _build_lend_intent()
+        intent.validFromTimestamp = int(_t.time()) + 86400  # one day from now
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "not yet valid" in result
+
+    def test_preflight_rejects_rate_floor_above_ceiling(self, provider: FloeActionProvider):
+        # Lender demands 20% floor; borrower caps at 10% → incompatible
+        intent = _build_lend_intent(rate_bps=2000)
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "minimum rate" in result
+
+    def test_preflight_rejects_ltv_exceeds_max(self, provider: FloeActionProvider):
+        intent = _build_lend_intent()
+        intent.maxLtvBps = 6000  # lender caps at 60%; borrower wants 70%
+        result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
+        assert "max LTV" in result
+
+    def test_preflight_rejects_duration_outside_window(self, provider: FloeActionProvider):
+        intent = _build_lend_intent(min_dur=30 * 86400, max_dur=90 * 86400)
+        args = self._base_args()
+        args["duration"] = str(7 * 86400)  # 7 days, below lender's 30-day minimum
+        result = provider.manual_match_credit(self._preflight_wallet(intent), args)
+        assert "duration" in result
+
 
 class TestInstantBorrow:
     def test_picks_lowest_rate_compatible_offer(
@@ -539,7 +597,6 @@ class TestOnBehalfOfPropagation:
     def _spy(self, provider: FloeActionProvider, monkeypatch) -> dict:
         """Replace _build_borrow_struct with a capturing stub."""
         captured: dict = {}
-        real = provider._build_borrow_struct
 
         def stub(**kwargs):
             captured.update(kwargs)

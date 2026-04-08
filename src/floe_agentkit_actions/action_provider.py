@@ -1951,26 +1951,31 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             return f"Error verifying FlashArbReceiver: {e}"
 
     # ════════════════════════════════════════════════════════════════════════
-    #  CREDIT FACILITY ACTIONS — Phase A parity port from TS agentkit
+    #  CREDIT FACILITY ACTIONS — at TS parity (7 actions)
     # ════════════════════════════════════════════════════════════════════════
     #
-    # The TS agentkit (agentkit-actions) exposes 30 Floe actions including
-    # high-level credit facility wrappers. This Python port currently has
-    # the 23 base actions above. The credit facility block below closes
-    # the gap incrementally.
+    # High-level credit-facility wrappers for AI agents managing working
+    # capital. These 7 actions sit on top of the 23 base Floe actions to
+    # reach full parity with agentkit-actions (TypeScript) at 30 Floe
+    # actions total. Parity closed in commit 854fd92.
     #
-    # Phase A (NO new infrastructure required):
-    #   - check_credit_status   ✓
-    #   - repay_credit          ✓
+    # Read-only:
+    #   - check_credit_status   — combined health/balance/timeline view
+    #   - request_credit        — browse available lend offers (RPC event scan)
     #
-    # Phase A.2 (requires RPC client + event log scanning infrastructure):
-    #   - request_credit        (needs FloeConfig.rpc_url + LOG_LENDER_OFFER_POSTED ABI)
-    #   - manual_match_credit   (depends on request_credit UX flow)
-    #   - renew_credit_line     (depends on repay_credit + manual_match_credit)
+    # Single-tx:
+    #   - repay_credit          — full repayment with auto-slippage
     #
-    # Phase B (requires Python floe-credit-sdk client adapter):
-    #   - instant_borrow
-    #   - repay_and_reborrow
+    # Multi-tx flows:
+    #   - manual_match_credit   — open a facility against a specific offer
+    #                             (2-tx: register + match)
+    #   - renew_credit_line     — repay + register + match (3-tx)
+    #   - instant_borrow        — auto-select best offer + match (2-tx)
+    #   - repay_and_reborrow    — repay + instant_borrow (3-tx)
+    #
+    # request_credit / instant_borrow / repay_and_reborrow require
+    # FloeConfig.rpc_url for the event-log scan path; they raise a clear
+    # error at call time if it's missing.
     #
     # Parity tracker: tests/test_action_count.py
 
@@ -2192,7 +2197,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
         except Exception as e:
             return f"Error repaying credit facility: {e}"
 
-    # ── Phase A.2 / B helpers ─────────────────────────────────────────────
+    # ── Credit-facility helpers ───────────────────────────────────────────
 
     def _get_public_client(self) -> Web3:
         """Lazy Web3 HTTP client for event log scanning. Requires rpc_url."""
@@ -2266,9 +2271,79 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 getattr(intent, "lender", zero_addr).lower() != zero_addr
                 and int(intent.filledAmount) < int(intent.amount)
                 and int(intent.expiry) > now
+                # Filter out offers whose valid-from window hasn't opened
+                # yet. Advertising them would let request_credit surface
+                # an intent that instant_borrow then can't actually match.
+                and int(getattr(intent, "validFromTimestamp", 0)) <= now
             ):
                 results.append({"hash": "0x" + h.hex(), "intent": intent})
         return results
+
+    def _check_lend_intent_compatibility(
+        self,
+        lend_intent: Any,
+        *,
+        market_id: str,
+        borrow_amount: int,
+        max_rate_bps: int,
+        min_ltv_bps: int,
+        duration: int,
+    ) -> Optional[str]:
+        """Preflight a borrow request against a lend intent.
+
+        Returns a human-readable error string if the intent is incompatible
+        (wrong market, revoked, expired, not yet valid, rate/duration/LTV
+        mismatch, insufficient remaining), or None if the intent is
+        matchable. Used by both manual_match_credit (single-intent path)
+        and instant_borrow (auto-select path) so both routes apply the
+        same rules and fail BEFORE sending registerBorrowIntent — which
+        would otherwise leave stray on-chain state when matchLoanIntents
+        reverts.
+        """
+        zero_addr = "0x0000000000000000000000000000000000000000"
+        if getattr(lend_intent, "lender", zero_addr).lower() == zero_addr:
+            return "Lend intent not found on-chain. It may have been revoked or already fully matched."
+
+        # Market must match — matching across markets would revert anyway.
+        intent_market_raw = getattr(lend_intent, "marketId", None)
+        if isinstance(intent_market_raw, (bytes, bytearray)):
+            intent_market = "0x" + intent_market_raw.hex()
+        else:
+            intent_market = str(intent_market_raw) if intent_market_raw is not None else ""
+        if intent_market.lower() != market_id.lower():
+            return (
+                f"Lend intent belongs to market {intent_market}, but borrow requested market {market_id}."
+            )
+
+        now = int(time.time())
+        if int(getattr(lend_intent, "validFromTimestamp", 0)) > now:
+            return "Lend intent is not yet valid (validFromTimestamp in the future)."
+        if int(lend_intent.expiry) <= now:
+            return "Lend intent has expired."
+
+        remaining = int(lend_intent.amount) - int(lend_intent.filledAmount)
+        if remaining < borrow_amount:
+            return (
+                f"Lend intent only has {remaining} remaining (raw units), "
+                f"but you requested {borrow_amount}."
+            )
+
+        if int(lend_intent.minInterestRateBps) > max_rate_bps:
+            return (
+                f"Requested max_interest_rate_bps ({max_rate_bps}) is below the "
+                f"lend intent's minimum rate ({int(lend_intent.minInterestRateBps)})."
+            )
+        if int(lend_intent.maxLtvBps) < min_ltv_bps:
+            return (
+                f"Requested min_ltv_bps ({min_ltv_bps}) exceeds the lend intent's "
+                f"max LTV ({int(lend_intent.maxLtvBps)})."
+            )
+        if duration < int(lend_intent.minDuration) or duration > int(lend_intent.maxDuration):
+            return (
+                f"Requested duration ({duration}s) is outside the lend intent's "
+                f"allowed range [{int(lend_intent.minDuration)}, {int(lend_intent.maxDuration)}]s."
+            )
+        return None
 
     def _extract_loan_id_from_receipt(self, receipt: Any) -> Optional[str]:
         """Parse LogIntentsMatchedDetailed from a transaction receipt's logs."""
@@ -2500,22 +2575,20 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 args=[lend_hash],
             )
 
-            zero_addr = "0x0000000000000000000000000000000000000000"
-            if getattr(lend_intent, "lender", zero_addr).lower() == zero_addr:
-                return (
-                    f"Lend intent {lend_hash} not found on-chain. It may have "
-                    f"been revoked or already fully matched."
-                )
-
-            remaining = int(lend_intent.amount) - int(lend_intent.filledAmount)
-            if remaining < borrow_amount:
-                loan_meta = resolve_token_meta(market.loanToken, wallet_provider)
-                return (
-                    f"Lend intent only has "
-                    f"{format_token_amount(remaining, loan_meta['decimals'], loan_meta['symbol'])} "
-                    f"remaining, but you requested "
-                    f"{format_token_amount(borrow_amount, loan_meta['decimals'], loan_meta['symbol'])}."
-                )
+            # Preflight ALL compatibility checks BEFORE sending TX1. If TX1
+            # (registerBorrowIntent) lands but TX2 (matchLoanIntents) reverts
+            # because of a market/rate/duration/LTV/validFrom mismatch, we
+            # leave stray on-chain state and waste the user's gas on TX1.
+            incompat = self._check_lend_intent_compatibility(
+                lend_intent,
+                market_id=market_id,
+                borrow_amount=borrow_amount,
+                max_rate_bps=max_rate_bps,
+                min_ltv_bps=min_ltv_bps,
+                duration=duration,
+            )
+            if incompat is not None:
+                return f"Cannot open credit facility against {lend_hash}: {incompat}"
 
             # Auto-approve 101% of collateral
             approval_amount = (collateral_amount * 101) // 100
@@ -2705,21 +2778,29 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             market_id = args["market_id"]
             borrow_amount = int(args["borrow_amount"])
             max_rate_bps = int(args["max_interest_rate_bps"])
+            min_ltv_bps = int(args.get("min_ltv_bps", "8000"))
             duration = int(args["duration"])
 
             available = self._scan_available_lend_intents(wallet_provider, market_id)
-            # Filter compatible: enough remaining, rate <= max, duration in window
-            compatible = []
-            for entry in available:
-                intent = entry["intent"]
-                remaining = int(intent.amount) - int(intent.filledAmount)
-                if remaining < borrow_amount:
-                    continue
-                if int(intent.minInterestRateBps) > max_rate_bps:
-                    continue
-                if int(intent.minDuration) > duration or int(intent.maxDuration) < duration:
-                    continue
-                compatible.append(entry)
+            # Apply the same preflight rules that manual_match_credit will
+            # re-check before TX1. Using the shared helper keeps both paths
+            # in sync — otherwise instant_borrow could auto-select an offer
+            # (e.g. one with maxLtvBps < min_ltv_bps or a future
+            # validFromTimestamp) that manual_match_credit would then reject
+            # downstream, wasting the whole round-trip.
+            compatible = [
+                entry
+                for entry in available
+                if self._check_lend_intent_compatibility(
+                    entry["intent"],
+                    market_id=market_id,
+                    borrow_amount=borrow_amount,
+                    max_rate_bps=max_rate_bps,
+                    min_ltv_bps=min_ltv_bps,
+                    duration=duration,
+                )
+                is None
+            ]
 
             if not compatible:
                 return (
@@ -2788,7 +2869,11 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             if repay_result.startswith("Error"):
                 return repay_result
 
-            # Step 2: instant_borrow with old loan defaults if not provided
+            # Step 2: instant_borrow with old loan defaults if not provided.
+            # Every defaultable parameter — including min_ltv_bps — is
+            # copied from the old loan so a renewal doesn't silently
+            # tighten constraints and break a facility that was opened
+            # under looser terms.
             borrow_amount = args.get("new_borrow_amount") or str(int(old_loan.principal))
             collateral_amount = (
                 args.get("new_collateral_amount") or str(int(old_loan.collateralAmount))
@@ -2797,6 +2882,9 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 args.get("max_interest_rate_bps") or str(int(old_loan.interestRateBps))
             )
             duration = args.get("duration") or str(int(old_loan.duration))
+            # Reuse the old loan's origination LTV on renewal. Hardcoding
+            # 8000 would reject any facility that was opened below 80%.
+            min_ltv_bps = str(int(old_loan.ltvBps))
             market_id = "0x" + old_loan.marketId.hex() if isinstance(old_loan.marketId, (bytes, bytearray)) else old_loan.marketId
 
             borrow_args: dict[str, Any] = {
@@ -2805,7 +2893,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 "collateral_amount": collateral_amount,
                 "max_interest_rate_bps": max_rate,
                 "duration": duration,
-                "min_ltv_bps": "8000",
+                "min_ltv_bps": min_ltv_bps,
             }
             # Thread on_behalf_of through — RepayAndReborrowSchema advertises
             # it and silently ignoring it would be misleading.

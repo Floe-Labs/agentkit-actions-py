@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 from eth_utils import function_signature_to_4byte_selector
 
 from floe_agentkit_actions.x402_action_provider import X402ActionProvider, X402Config

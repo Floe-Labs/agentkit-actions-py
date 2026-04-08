@@ -74,11 +74,12 @@ def test_total_action_count_matches_current_python_state() -> None:
 
 
 def test_python_port_parity_gap_is_documented() -> None:
-    """Live tracker: when the Python port catches up to TypeScript, this
-    test can be updated to assert PARITY_GAP == 0 and removed.
+    """Assert that the documented Python/TypeScript parity gap stays closed.
 
-    Until then, it documents the gap loudly so nobody thinks the Python
-    port has full parity with TS."""
+    As of commit 854fd92 the gap is 0. If a new action lands in TypeScript
+    ahead of Python (or vice versa), update the constants at the top of
+    this file AND floe-labs-docs in the same PR.
+    """
     total = _count_actions(FloeActionProvider) + _count_actions(X402ActionProvider)
     gap = TS_REFERENCE_TOTAL - total
     assert gap == PARITY_GAP, (
@@ -86,4 +87,3 @@ def test_python_port_parity_gap_is_documented() -> None:
         f"is {gap}, expected {PARITY_GAP}. If the gap changed, update the "
         f"constants AND floe-labs-docs if the user-facing count is affected."
     )
-    assert gap == 0 or gap == PARITY_GAP, "unexpected parity state"

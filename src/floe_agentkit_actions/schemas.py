@@ -610,7 +610,8 @@ class RequestCreditSchema(BaseModel):
     )
     max_results: int = Field(
         default=10,
-        description="Maximum number of offers to return (default: 10).",
+        ge=1,
+        description="Maximum number of offers to return (default: 10, min: 1).",
     )
 
     @field_validator("market_id")

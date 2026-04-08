@@ -17,8 +17,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
 from floe_agentkit_actions.action_provider import FloeActionProvider
 from floe_agentkit_actions.constants import BASE_MAINNET_MATCHER
 

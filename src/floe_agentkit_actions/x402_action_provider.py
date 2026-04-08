@@ -229,6 +229,42 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def grant_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
+            # Validate local inputs BEFORE hitting the facilitator. A
+            # malformed borrow_limit / max_rate_bps / expiry_days previously
+            # would still trigger /agents/pre-register (creating Privy
+            # state on the facilitator side) before the local validation
+            # rejected the call. Fail fast to keep the facilitator clean.
+            #
+            # Precise decimal→USDC raw conversion. Parsing via float is a
+            # money-math bug: `int(float("1.5")) == 1` silently drops $0.50,
+            # and larger amounts can lose more to float rounding. Use Decimal
+            # end-to-end so fractional inputs like "1500.25" produce
+            # 1_500_250_000 raw units exactly.
+            usdc_decimals = 6
+            try:
+                borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
+                max_rate_bps = int(args["max_rate_bps"])
+                expiry_days = int(args["expiry_days"])
+            except (InvalidOperation, TypeError, ValueError) as e:
+                return f"Invalid delegation input: {e}"
+            if borrow_limit_decimal <= 0:
+                return (
+                    f"borrow_limit must be positive, got '{args['borrow_limit']}'. "
+                    "A zero or negative credit line cannot be delegated."
+                )
+            if max_rate_bps <= 0:
+                return f"max_rate_bps must be positive, got {max_rate_bps}."
+            if expiry_days <= 0:
+                return f"expiry_days must be positive, got {expiry_days}."
+            scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
+            if scaled != scaled.to_integral_value():
+                return (
+                    f"borrow_limit '{args['borrow_limit']}' has more precision than "
+                    f"USDC supports ({usdc_decimals} decimals). Reduce the precision."
+                )
+            borrow_limit_raw = int(scaled)
+            expiry_ts = int(time.time()) + expiry_days * 86400
+
             agent_address = wallet_provider.get_address()
             facilitator_url = args["facilitator_url"]
             # Set facilitator URL before first API call
@@ -248,30 +284,6 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             privy_wallet = pre_reg["body"]["privyWalletAddress"]
 
             # Step 2: setOperator
-            # Precise decimal→USDC raw conversion. Parsing via float is a
-            # money-math bug: `int(float("1.5")) == 1` silently drops $0.50,
-            # and larger amounts can lose more to float rounding. Use Decimal
-            # end-to-end so fractional inputs like "1500.25" produce
-            # 1_500_250_000 raw units exactly.
-            usdc_decimals = 6
-            try:
-                borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
-            except (InvalidOperation, ValueError) as e:
-                return f"Invalid borrow_limit '{args['borrow_limit']}': {e}"
-            if borrow_limit_decimal <= 0:
-                return (
-                    f"borrow_limit must be positive, got '{args['borrow_limit']}'. "
-                    "A zero or negative credit line cannot be delegated."
-                )
-            scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
-            if scaled != scaled.to_integral_value():
-                return (
-                    f"borrow_limit '{args['borrow_limit']}' has more precision than "
-                    f"USDC supports ({usdc_decimals} decimals). Reduce the precision."
-                )
-            borrow_limit_raw = int(scaled)
-            max_rate_bps = int(args["max_rate_bps"])
-            expiry_ts = int(time.time()) + int(args["expiry_days"]) * 86400
 
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
             encoded = contract.encode_abi("setOperator",
