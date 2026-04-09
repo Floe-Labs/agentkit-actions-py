@@ -568,6 +568,66 @@ class TestManualMatchCredit:
         result = provider.manual_match_credit(self._preflight_wallet(intent), self._base_args())
         assert "minimum fill" in result
 
+    # ── Receipt status regressions (round 8) ─────────────────────────────
+    # manual_match_credit must reject status=0 (reverted) and exception
+    # (unconfirmable) receipts from BOTH TX1 and TX2, exactly like
+    # repay_credit does. Missing this check meant a reverted
+    # registerBorrowIntent or matchLoanIntents would surface as
+    # "## Credit Facility Opened" and the callers that delegate here
+    # (instant_borrow, renew_credit_line) would inherit the false success.
+
+    def _happy_path_wallet(self) -> MockWalletProvider:
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getMarket", _build_market())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getOnChainLendIntent", _build_lend_intent()
+        )
+        wallet.mock_read(
+            "0x4200000000000000000000000000000000000006", "allowance", 2**256 - 1
+        )
+        wallet.mock_send("0xregister")
+        wallet.mock_send("0xmatch")
+        return wallet
+
+    def test_reverted_tx1_returns_error_not_success(self, provider: FloeActionProvider):
+        wallet = self._happy_path_wallet()
+        # TX1 receipt reverts
+        wallet.wait_for_transaction_receipt = lambda tx: {  # type: ignore[method-assign]
+            "transactionHash": tx,
+            "status": 0,
+        }
+        result = provider.manual_match_credit(wallet, self._base_args())
+        assert "Credit Facility Opened" not in result
+        assert "Register borrow intent reverted" in result
+
+    def test_reverted_tx2_returns_error_not_success(self, provider: FloeActionProvider):
+        wallet = self._happy_path_wallet()
+        # TX1 succeeds, TX2 reverts
+        call_count = {"n": 0}
+
+        def mock_wait(tx: str) -> dict:
+            call_count["n"] += 1
+            return {"transactionHash": tx, "status": 1 if call_count["n"] == 1 else 0}
+
+        wallet.wait_for_transaction_receipt = mock_wait  # type: ignore[method-assign]
+        result = provider.manual_match_credit(wallet, self._base_args())
+        assert "Credit Facility Opened" not in result
+        assert "Match loan intents reverted" in result
+        # TX1 hash must be mentioned so the operator can revoke the stray intent
+        assert "0xregister" in result
+
+    def test_tx1_receipt_wait_failure_surfaces_as_error(self, provider: FloeActionProvider):
+        wallet = self._happy_path_wallet()
+
+        def raise_rpc(_tx: str) -> dict:
+            raise RuntimeError("RPC timeout on TX1")
+
+        wallet.wait_for_transaction_receipt = raise_rpc  # type: ignore[method-assign]
+        result = provider.manual_match_credit(wallet, self._base_args())
+        assert "Credit Facility Opened" not in result
+        assert "could not be confirmed" in result
+        assert "0xregister" in result
+
 
 class TestInstantBorrow:
     def test_picks_lowest_rate_compatible_offer(
@@ -668,6 +728,40 @@ class TestRepayAndReborrow:
         wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", loan)
         result = provider.repay_and_reborrow(wallet, {"loan_id": "1"})
         assert "already repaid" in result
+
+    def test_reverted_repay_does_not_proceed_to_reborrow(
+        self, provider: FloeActionProvider
+    ):
+        """Regression for round 8: repay_and_reborrow must NOT continue
+        into reborrow when repay_credit returns a reverted-receipt plain
+        string. Previously the blacklist check 'startswith(Error)'
+        treated that as success because the reverted message starts
+        with 'Repay transaction' not 'Error'."""
+        wallet = MockWalletProvider()
+        wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", _build_active_loan())
+        wallet.mock_read(
+            BASE_MAINNET_MATCHER, "getAccruedInterest", (5 * 10**6, 86400)
+        )
+        wallet.mock_read(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "allowance",
+            2**256 - 1,
+        )
+        wallet.mock_send("0xrepayreverted")
+        # Simulate reverted repay receipt — repay_credit will return a
+        # "Repay transaction ... reverted on-chain" plain string that
+        # does NOT start with "Error".
+        wallet.wait_for_transaction_receipt = lambda tx: {  # type: ignore[method-assign]
+            "transactionHash": tx,
+            "status": 0,
+        }
+
+        result = provider.repay_and_reborrow(wallet, {"loan_id": "1"})
+        # Must bubble up the repay failure, NOT a "Credit Line Renewed"
+        # message, and definitely not try to open a new facility.
+        assert "reverted" in result.lower()
+        assert "Credit Line Renewed" not in result
+        assert "Credit Facility Opened" not in result
 
 
 # ── on_behalf_of threading (regression for Copilot #2/#3/#4) ───────────────

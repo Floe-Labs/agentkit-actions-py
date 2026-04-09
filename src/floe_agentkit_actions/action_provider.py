@@ -2706,16 +2706,40 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
 
             contract = _w3.eth.contract(abi=LENDING_MATCHER_ABI)
 
-            # TX 1: register borrow intent
+            # TX 1: register borrow intent.
+            # Must inspect the receipt status — a reverted registerBorrowIntent
+            # would otherwise let the flow proceed to TX2 (which will then
+            # fail against no on-chain intent) and the final string would
+            # still claim success. See round-5 fix in repay_credit for the
+            # same pattern.
             register_data = contract.encode_abi(
                 "registerBorrowIntent", args=[borrow_struct]
             )
             register_tx = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": register_data}
             )
-            wallet_provider.wait_for_transaction_receipt(register_tx)
+            try:
+                register_receipt = wallet_provider.wait_for_transaction_receipt(register_tx)
+            except Exception as e:
+                return (
+                    f"Register borrow intent submitted ({register_tx}) but could not be "
+                    f"confirmed: {e}. Check the receipt before retrying — if TX1 "
+                    f"actually landed, a retry would create a duplicate intent."
+                )
+            register_status = (
+                register_receipt.get("status") if isinstance(register_receipt, dict)
+                else getattr(register_receipt, "status", None)
+            )
+            if register_status == 0:
+                return (
+                    f"Register borrow intent reverted on-chain (tx={register_tx}). "
+                    f"No credit facility opened. Check the intent parameters and retry."
+                )
 
-            # TX 2: match
+            # TX 2: match. Same receipt-status gate — a reverted match would
+            # leave the borrow intent sitting on-chain without a loan, which
+            # is recoverable (retry matchLoanIntents) but must NOT surface
+            # as success.
             lend_tuple = self._lend_intent_to_tuple(lend_intent)
             market_id_bytes = bytes.fromhex(market_id[2:])
             match_data = contract.encode_abi(
@@ -2725,7 +2749,25 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             match_tx = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": match_data}
             )
-            match_receipt = wallet_provider.wait_for_transaction_receipt(match_tx)
+            try:
+                match_receipt = wallet_provider.wait_for_transaction_receipt(match_tx)
+            except Exception as e:
+                return (
+                    f"Match loan intents submitted ({match_tx}) but could not be "
+                    f"confirmed: {e}. The borrow intent was registered in TX1 "
+                    f"({register_tx}) and may still be matchable — check state "
+                    f"before retrying."
+                )
+            match_status = (
+                match_receipt.get("status") if isinstance(match_receipt, dict)
+                else getattr(match_receipt, "status", None)
+            )
+            if match_status == 0:
+                return (
+                    f"Match loan intents reverted on-chain (tx={match_tx}). "
+                    f"Borrow intent was registered (tx={register_tx}) but no loan "
+                    f"was created. Retry matchLoanIntents or revoke the intent."
+                )
 
             loan_id = self._extract_loan_id_from_receipt(match_receipt)
             loan_meta = resolve_token_meta(market.loanToken, wallet_provider)
@@ -2980,7 +3022,14 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                     "slippage_bps": args.get("slippage_bps", "500"),
                 },
             )
-            if repay_result.startswith("Error"):
+            # Gate on the SUCCESS marker, not a blacklist of failure prefixes.
+            # Round-5 made repay_credit return plain-text strings like
+            # "Repay transaction reverted on-chain..." for reverted or
+            # unconfirmable receipts — those do not start with "Error", so
+            # a blacklist check would treat them as success and proceed
+            # into reborrow on a still-open loan. Exactly the false-success
+            # bug round-5 was supposed to prevent.
+            if not repay_result.startswith("## Credit Facility Repaid"):
                 return repay_result
 
             # Step 2: instant_borrow with old loan defaults if not provided.
