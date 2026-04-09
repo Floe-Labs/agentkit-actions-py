@@ -6,11 +6,13 @@ import json
 import re
 import time
 import secrets
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
-from coinbase_agentkit import ActionProvider, EvmWalletProvider, Network, create_action
+from coinbase_agentkit import ActionProvider, EvmWalletProvider, create_action
+from coinbase_agentkit.network import Network
 from web3 import Web3
 
 from .constants import (
@@ -181,7 +183,11 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return {"status": resp.status, "body": json.loads(resp.read()), "headers": {k.lower(): v for k, v in resp.headers.items()}}
+                return {
+                    "status": resp.status,
+                    "body": json.loads(resp.read()),
+                    "headers": {k.lower(): v for k, v in resp.headers.items()},
+                }
         except urllib.error.HTTPError as e:
             body_text = e.read().decode() if e.fp else ""
             try:
@@ -206,7 +212,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         if int(current) >= required_amount:
             return None
         contract = _w3.eth.contract(abi=ERC20_ABI)
-        encoded = contract.encode_abi(fn_name="approve", args=[spender_address, required_amount])
+        encoded = contract.encode_abi("approve", args=[spender_address, required_amount])
         return wallet_provider.send_transaction(transaction={"to": token_address, "data": encoded})
 
     # ── grant_credit_delegation ────────────────────────────────────────────
@@ -223,6 +229,56 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def grant_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
+            # Validate local inputs BEFORE hitting the facilitator. A
+            # malformed borrow_limit / max_rate_bps / expiry_days previously
+            # would still trigger /agents/pre-register (creating Privy
+            # state on the facilitator side) before the local validation
+            # rejected the call. Fail fast to keep the facilitator clean.
+            #
+            # Precise decimal→USDC raw conversion. Parsing via float is a
+            # money-math bug: `int(float("1.5")) == 1` silently drops $0.50,
+            # and larger amounts can lose more to float rounding. Use Decimal
+            # end-to-end so fractional inputs like "1500.25" produce
+            # 1_500_250_000 raw units exactly.
+            usdc_decimals = 6
+            try:
+                borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
+                max_rate_bps = int(args["max_rate_bps"])
+                expiry_days = int(args["expiry_days"])
+            except KeyError as e:
+                return f"Invalid delegation input: missing required field {e.args[0]!r}"
+            except (InvalidOperation, TypeError, ValueError) as e:
+                return f"Invalid delegation input: {e}"
+            if borrow_limit_decimal <= 0:
+                return (
+                    f"borrow_limit must be positive, got '{args['borrow_limit']}'. "
+                    "A zero or negative credit line cannot be delegated."
+                )
+            if max_rate_bps <= 0:
+                return f"max_rate_bps must be positive, got {max_rate_bps}."
+            if expiry_days <= 0:
+                return f"expiry_days must be positive, got {expiry_days}."
+            scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
+            if scaled != scaled.to_integral_value():
+                return (
+                    f"borrow_limit '{args['borrow_limit']}' has more precision than "
+                    f"USDC supports ({usdc_decimals} decimals). Reduce the precision."
+                )
+            borrow_limit_raw = int(scaled)
+            expiry_ts = int(time.time()) + expiry_days * 86400
+            # Bound-check against uint256 before encoding calldata. Python's
+            # arbitrary-precision int otherwise lets oversized inputs through
+            # local validation only to fail later at ABI encode time with a
+            # less-actionable error. All three fields are uint256 in OPERATOR_ABI.
+            max_uint256 = (1 << 256) - 1
+            for field_name, value in (
+                ("borrow_limit", borrow_limit_raw),
+                ("max_rate_bps", max_rate_bps),
+                ("expiry", expiry_ts),
+            ):
+                if value > max_uint256:
+                    return f"{field_name} is too large for uint256 ({value})."
+
             agent_address = wallet_provider.get_address()
             facilitator_url = args["facilitator_url"]
             # Set facilitator URL before first API call
@@ -242,14 +298,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             privy_wallet = pre_reg["body"]["privyWalletAddress"]
 
             # Step 2: setOperator
-            usdc_decimals = 6
-            borrow_limit_raw = int(float(args["borrow_limit"])) * (10 ** usdc_decimals)
-            max_rate_bps = int(args["max_rate_bps"])
-            expiry_ts = int(time.time()) + int(args["expiry_days"]) * 86400
 
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi(
-                fn_name="setOperator",
+            encoded = contract.encode_abi("setOperator",
                 args=[args["facilitator_address"], borrow_limit_raw, max_rate_bps, expiry_ts, privy_wallet],
             )
             set_op_tx = wallet_provider.send_transaction(
@@ -313,7 +364,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def revoke_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi(fn_name="revokeOperator", args=[args["facilitator_address"]])
+            encoded = contract.encode_abi("revokeOperator", args=[args["facilitator_address"]])
             tx_hash = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
             )
@@ -464,7 +515,13 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_get_transactions(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            limit = int(args.get("limit", "20"))
+            # Clamp limit to <=100 and default to 20 for non-numeric/negative/zero input.
+            # Mirrors the TypeScript port's commits 40cc356 / b4bcb3c.
+            try:
+                parsed = int(args.get("limit", "20"))
+                limit = min(parsed, 100) if parsed > 0 else 20
+            except (ValueError, TypeError):
+                limit = 20
             resp = self._facilitator_fetch(f"/agents/transactions?limit={limit}")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"

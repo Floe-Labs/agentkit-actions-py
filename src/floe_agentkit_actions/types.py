@@ -136,6 +136,19 @@ class FloeConfig:
     lending_intent_matcher_address: Optional[str] = None
     lending_views_address: Optional[str] = None
     known_market_ids: list[str] = field(default_factory=list)
+    # RPC URL for read-side helpers that need event log scanning
+    # (e.g. request_credit, instant_borrow). Optional — actions that need
+    # it raise a clear error if it's missing. Defaults to public Base RPC
+    # only when explicitly opted in via Web3 default; production deployments
+    # should set this to an Alchemy/Infura/etc URL to avoid rate limits.
+    rpc_url: Optional[str] = None
+    # How many blocks back to scan for LogLenderOfferPosted events when
+    # browsing available credit offers (request_credit, instant_borrow).
+    # Default ~7 days on Base (~2s blocks) — long enough to find real open
+    # offers, short enough to stay well inside Alchemy eth_getLogs range
+    # limits and keep response times bounded as protocol usage grows.
+    # Set to None to scan from matcher deployment block (legacy behavior).
+    offer_scan_lookback_blocks: Optional[int] = 300_000
 
 
 @dataclass
