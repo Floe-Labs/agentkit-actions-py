@@ -3002,6 +3002,23 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
     def repay_and_reborrow(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             old_loan_id = int(args["loan_id"])
+
+            # Preflight the RPC requirement BEFORE touching the chain.
+            # instant_borrow (Step 2) needs FloeConfig.rpc_url for the
+            # event-log scan path; if it's missing we'd otherwise repay
+            # the old loan (Step 1 succeeds) and then fail on Step 2,
+            # leaving the user with a closed facility and no replacement.
+            # Better to refuse the whole flow up front.
+            if not self._rpc_url:
+                return (
+                    "Cannot repay_and_reborrow: FloeConfig.rpc_url is not configured. "
+                    "The reborrow step requires an RPC URL for event-log scanning. "
+                    "Refusing to proceed — otherwise the repay would succeed and "
+                    "the reborrow would fail, leaving you with a closed credit "
+                    "facility and no replacement. Set rpc_url and retry, or use "
+                    "repay_credit directly if you only want to close the loan."
+                )
+
             old_loan = wallet_provider.read_contract(
                 contract_address=self._matcher_address,
                 abi=LENDING_MATCHER_ABI,

@@ -721,7 +721,13 @@ class TestRenewCreditLine:
 
 
 class TestRepayAndReborrow:
-    def test_already_repaid_short_circuits(self, provider: FloeActionProvider):
+    def test_already_repaid_short_circuits(
+        self, provider: FloeActionProvider, monkeypatch
+    ):
+        # Bypass round-9 rpc_url preflight — this test covers the
+        # already-repaid short-circuit, which happens AFTER the preflight
+        # but doesn't actually touch the RPC.
+        monkeypatch.setattr(provider, "_rpc_url", "http://test.invalid")
         wallet = MockWalletProvider()
         loan = MagicMock()
         loan.repaid = True
@@ -730,13 +736,16 @@ class TestRepayAndReborrow:
         assert "already repaid" in result
 
     def test_reverted_repay_does_not_proceed_to_reborrow(
-        self, provider: FloeActionProvider
+        self, provider: FloeActionProvider, monkeypatch
     ):
         """Regression for round 8: repay_and_reborrow must NOT continue
         into reborrow when repay_credit returns a reverted-receipt plain
         string. Previously the blacklist check 'startswith(Error)'
         treated that as success because the reverted message starts
         with 'Repay transaction' not 'Error'."""
+        # Bypass the round-9 rpc_url preflight — this test exercises
+        # the reverted-repay code path AFTER preflight.
+        monkeypatch.setattr(provider, "_rpc_url", "http://test.invalid")
         wallet = MockWalletProvider()
         wallet.mock_read(BASE_MAINNET_MATCHER, "getLoan", _build_active_loan())
         wallet.mock_read(
@@ -760,6 +769,36 @@ class TestRepayAndReborrow:
         # Must bubble up the repay failure, NOT a "Credit Line Renewed"
         # message, and definitely not try to open a new facility.
         assert "reverted" in result.lower()
+        assert "Credit Line Renewed" not in result
+        assert "Credit Facility Opened" not in result
+
+    def test_missing_rpc_url_refuses_before_repay(self):
+        """Regression for round 9: repay_and_reborrow must preflight the
+        rpc_url requirement BEFORE closing the old loan. Otherwise a
+        missing config causes Step 1 (repay) to succeed and Step 2
+        (instant_borrow, which needs rpc_url) to fail, leaving the
+        caller with a closed facility and no replacement. Construct a
+        provider with no rpc_url and verify:
+          1. The error message names rpc_url so the operator can fix it
+          2. The wallet was NEVER asked to send_transaction (no repay)
+          3. The wallet was NEVER asked to read getLoan (we refuse upfront)
+        """
+        # Fresh provider with no rpc_url
+        from floe_agentkit_actions.types import FloeConfig
+        provider_no_rpc = FloeActionProvider(FloeConfig(rpc_url=None))
+
+        wallet = MockWalletProvider()
+        # Intentionally do NOT mock getLoan or mock_send — if the
+        # preflight fails to block, the test will raise a clear
+        # "No mock response for ..." error proving the flow proceeded
+        # further than it should have.
+
+        result = provider_no_rpc.repay_and_reborrow(wallet, {"loan_id": "1"})
+        assert "rpc_url" in result
+        assert "not configured" in result
+        # Success markers from the actual repay/reborrow paths must be
+        # absent — nothing downstream should have executed.
+        assert "Credit Facility Repaid" not in result
         assert "Credit Line Renewed" not in result
         assert "Credit Facility Opened" not in result
 
@@ -921,6 +960,12 @@ class TestOnBehalfOfPropagation:
         self, provider: FloeActionProvider, monkeypatch
     ):
         captured = self._spy(provider, monkeypatch)
+        # Bypass the round-9 rpc_url preflight — this test monkey-patches
+        # _scan_available_lend_intents directly, so it doesn't actually
+        # need a real RPC. The preflight exists to prevent the
+        # "missing config closes the loan" class of bug and is covered
+        # by its own test (test_missing_rpc_url_refuses_before_repay).
+        monkeypatch.setattr(provider, "_rpc_url", "http://test.invalid")
         wallet = MockWalletProvider()
 
         # Step 1: old loan state for repay_credit
