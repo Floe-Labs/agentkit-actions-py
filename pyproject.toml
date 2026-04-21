@@ -27,9 +27,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://floe.loans"
+Homepage = "https://floelabs.xyz"
 Repository = "https://github.com/Floe-Labs/agentkit-actions-py"
-Documentation = "https://docs.floe.loans/developers/agentkit-python"
+Documentation = "https://floe-labs.gitbook.io/docs/developers/agent-quickstart"
 
 dependencies = [
     "coinbase-agentkit>=0.7.0",
