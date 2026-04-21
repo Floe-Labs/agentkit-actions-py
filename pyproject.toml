@@ -10,6 +10,11 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 keywords = ["defi", "lending", "agentkit", "coinbase", "ai-agent", "floe", "base"]
+
+[[project.authors]]
+name = "Floe Labs"
+email = "hello@floelabs.xyz"
+
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -20,6 +25,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
+
+[project.urls]
+Homepage = "https://floe.loans"
+Repository = "https://github.com/Floe-Labs/agentkit-actions-py"
+Documentation = "https://docs.floe.loans/developers/agentkit-python"
 
 dependencies = [
     "coinbase-agentkit>=0.7.0",

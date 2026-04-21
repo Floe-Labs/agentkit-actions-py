@@ -19,3 +19,4 @@ venv/
 htmlcov/
 .floe-agent.json
 .wallet-data.json
+.claude/
