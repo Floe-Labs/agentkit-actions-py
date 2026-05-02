@@ -193,8 +193,8 @@ pytest
 
 ## Links
 
-- [Website](https://floelabs.xyz)
-- [Documentation](https://docs.floelabs.xyz)
+- [Website](https://dev-dashboardfloelabs.xyz)
+- [Documentation](https://floe-labs.gitbook.io/docs)
 - [TypeScript counterpart (floe-agent)](https://github.com/floelabs/agentkit-actions)
 - [MCP Server (@floelabs/mcp-server)](https://github.com/floelabs/floe-mcp-server)
 
