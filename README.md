@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-Coinbase AgentKit ActionProvider for the [Floe](https://floelabs.xyz) credit protocol on Base. **36 actions** for lending, borrowing, flash loans, and x402 credit delegation.
+Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.xyz) credit protocol on Base. **36 actions** for lending, borrowing, flash loans, and x402 credit delegation.
 
 ### 5-Second Example
 
