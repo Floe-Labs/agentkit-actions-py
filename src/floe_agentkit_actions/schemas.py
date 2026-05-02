@@ -163,8 +163,7 @@ class PostLendIntentSchema(BaseModel):
     )
     min_fill_amount: str = Field(
         description=(
-            "Minimum amount per match in raw token units. Set equal to amount "
-            "to require full fill."
+            "Minimum amount per match in raw token units. Set equal to amount to require full fill."
         ),
     )
     min_interest_rate_bps: str = Field(
@@ -195,8 +194,7 @@ class PostLendIntentSchema(BaseModel):
     expiry_seconds: str = Field(
         default="86400",
         description=(
-            "How long the intent remains valid, in seconds from now "
-            "(default: 86400 = 24 hours)."
+            "How long the intent remains valid, in seconds from now (default: 86400 = 24 hours)."
         ),
     )
     grace_period: str = Field(
@@ -234,15 +232,11 @@ class PostBorrowIntentSchema(BaseModel):
     )
     max_interest_rate_bps: str = Field(
         description=(
-            "Maximum acceptable annual interest rate in basis points "
-            "(e.g. '1000' = 10.00%)."
+            "Maximum acceptable annual interest rate in basis points (e.g. '1000' = 10.00%)."
         ),
     )
     min_ltv_bps: str = Field(
-        description=(
-            "Minimum LTV ratio in basis points for the actual loan "
-            "(e.g. '5000' = 50%)."
-        ),
+        description=("Minimum LTV ratio in basis points for the actual loan (e.g. '5000' = 50%)."),
     )
     min_duration: str = Field(
         description="Minimum loan duration in seconds.",
@@ -260,15 +254,13 @@ class PostBorrowIntentSchema(BaseModel):
     matcher_commission_bps: str = Field(
         default="50",
         description=(
-            "Commission paid to the solver/matcher bot in basis points "
-            "(default: 50 = 0.50%)."
+            "Commission paid to the solver/matcher bot in basis points (default: 50 = 0.50%)."
         ),
     )
     expiry_seconds: str = Field(
         default="86400",
         description=(
-            "How long the intent remains valid, in seconds from now "
-            "(default: 86400 = 24 hours)."
+            "How long the intent remains valid, in seconds from now (default: 86400 = 24 hours)."
         ),
     )
     on_behalf_of: Optional[str] = Field(
@@ -646,10 +638,7 @@ class ManualMatchCreditSchema(BaseModel):
     )
     on_behalf_of: Optional[str] = Field(
         default=None,
-        description=(
-            "Optional address to receive borrowed USDC. If omitted, sent to "
-            "your wallet."
-        ),
+        description=("Optional address to receive borrowed USDC. If omitted, sent to your wallet."),
     )
 
     @field_validator("lend_intent_hash", "market_id")
@@ -698,7 +687,9 @@ class InstantBorrowSchema(BaseModel):
     collateral_amount: str = Field(description="Collateral to post in raw token units.")
     max_interest_rate_bps: str = Field(description="Max acceptable annual interest rate in bps.")
     duration: str = Field(description="Loan duration in seconds.")
-    min_ltv_bps: str = Field(default="8000", description="Minimum LTV in bps (default: 8000 = 80%).")
+    min_ltv_bps: str = Field(
+        default="8000", description="Minimum LTV in bps (default: 8000 = 80%)."
+    )
     on_behalf_of: Optional[str] = Field(
         default=None,
         description="Optional address to receive borrowed USDC. If omitted, sent to your wallet.",

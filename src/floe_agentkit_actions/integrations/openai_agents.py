@@ -29,13 +29,15 @@ def get_floe_openai_tools(
         schema = action.schema
         json_schema = schema.model_json_schema() if hasattr(schema, "model_json_schema") else {}
 
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": action.name,
-                "description": action.description,
-                "parameters": json_schema,
-            },
-        })
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": action.name,
+                    "description": action.description,
+                    "parameters": json_schema,
+                },
+            }
+        )
 
     return tools

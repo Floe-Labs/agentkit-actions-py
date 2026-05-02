@@ -112,7 +112,9 @@ class AIClient:
                 {
                     "name": t["function"]["name"],
                     "description": t["function"].get("description", ""),
-                    "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}}),
+                    "input_schema": t["function"].get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
                 }
                 for t in tools
             ]

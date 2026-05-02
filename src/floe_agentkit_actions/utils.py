@@ -68,9 +68,7 @@ def format_price(price: int, scale: int = ORACLE_PRICE_SCALE) -> str:
     return f"{value:.8f}"
 
 
-def resolve_token_meta(
-    address: str, wallet_provider: Any
-) -> dict[str, Any]:
+def resolve_token_meta(address: str, wallet_provider: Any) -> dict[str, Any]:
     """Resolve token symbol and decimals, checking known tokens first."""
     lower = address.lower()
     for known_addr, meta in KNOWN_TOKENS.items():

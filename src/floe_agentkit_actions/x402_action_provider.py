@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import secrets
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
 from coinbase_agentkit import ActionProvider, EvmWalletProvider, create_action
 from coinbase_agentkit.network import Network
+from pydantic import BaseModel, Field, field_validator
 from web3 import Web3
 
 from .constants import (
@@ -20,10 +20,10 @@ from .constants import (
     ERC20_ABI,
 )
 from .utils import (
-    format_bps,
-    format_token_amount,
     format_address,
+    format_bps,
     format_duration,
+    format_token_amount,
 )
 
 # ── ABI fragments for operator functions ────────────────────────────────────
@@ -163,9 +163,11 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def supports_network(self, network: Network) -> bool:
         return network.chain_id in ("8453", "84532")
 
-    def _facilitator_fetch(self, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
-        import urllib.request
+    def _facilitator_fetch(
+        self, path: str, method: str = "GET", body: Any = None
+    ) -> dict[str, Any]:
         import urllib.error
+        import urllib.request
 
         if not self._facilitator_url:
             raise ValueError("facilitator_url not configured")
@@ -289,9 +291,15 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             sign_message = f"Register with Floe Facilitator\nNonce: {nonce}"
             signature = wallet_provider.sign_message(sign_message)
 
-            pre_reg = self._facilitator_fetch("/agents/pre-register", "POST", {
-                "walletAddress": agent_address, "signature": signature, "nonce": nonce,
-            })
+            pre_reg = self._facilitator_fetch(
+                "/agents/pre-register",
+                "POST",
+                {
+                    "walletAddress": agent_address,
+                    "signature": signature,
+                    "nonce": nonce,
+                },
+            )
             if pre_reg["status"] != 201 and pre_reg["status"] != 200:
                 return f"Pre-registration failed: {pre_reg['body'].get('error', 'Unknown error')}"
 
@@ -300,8 +308,15 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             # Step 2: setOperator
 
             contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi("setOperator",
-                args=[args["facilitator_address"], borrow_limit_raw, max_rate_bps, expiry_ts, privy_wallet],
+            encoded = contract.encode_abi(
+                "setOperator",
+                args=[
+                    args["facilitator_address"],
+                    borrow_limit_raw,
+                    max_rate_bps,
+                    expiry_ts,
+                    privy_wallet,
+                ],
             )
             set_op_tx = wallet_provider.send_transaction(
                 transaction={"to": self._matcher_address, "data": encoded}
@@ -310,7 +325,10 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             # Step 3: Approve collateral (max approval — agent controls via delegation limits)
             approval_amount = 2**256 - 1  # type(uint256).max
             approve_tx = self._ensure_allowance(
-                wallet_provider, args["collateral_token"], self._matcher_address, approval_amount,
+                wallet_provider,
+                args["collateral_token"],
+                self._matcher_address,
+                approval_amount,
             )
 
             # Step 4: Register
@@ -318,9 +336,15 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             reg_message = f"Register with Floe Facilitator\nNonce: {reg_nonce}"
             reg_signature = wallet_provider.sign_message(reg_message)
 
-            reg = self._facilitator_fetch("/agents/register", "POST", {
-                "walletAddress": agent_address, "signature": reg_signature, "nonce": reg_nonce,
-            })
+            reg = self._facilitator_fetch(
+                "/agents/register",
+                "POST",
+                {
+                    "walletAddress": agent_address,
+                    "signature": reg_signature,
+                    "nonce": reg_nonce,
+                },
+            )
             if reg["status"] != 201 and reg["status"] != 200:
                 return (
                     f"Registration failed (delegation set on-chain): {reg['body'].get('error', '')}. "
@@ -331,7 +355,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             self._facilitator_api_key = result.get("apiKey", "")
             self._facilitator_url = facilitator_url
 
-            credit_limit = format_token_amount(int(result.get("creditLimit", "0")), usdc_decimals, "USDC")
+            credit_limit = format_token_amount(
+                int(result.get("creditLimit", "0")), usdc_decimals, "USDC"
+            )
 
             lines = [
                 "## Credit Delegation Granted\n",
@@ -342,7 +368,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 f"**Expires**: {format_duration(int(args['expiry_days']) * 86400)}",
                 "",
                 f"**setOperator tx**: {set_op_tx}",
-                f"**Approval tx**: {approve_tx}" if approve_tx else "**Approval**: Already sufficient",
+                f"**Approval tx**: {approve_tx}"
+                if approve_tx
+                else "**Approval**: Already sufficient",
                 "",
                 f"> **API Key**: `{result.get('apiKey', '')}`",
                 "> Save this key — it won't be shown again.",
@@ -380,13 +408,15 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             if perm[0]:  # approved
                 return f"Warning: revokeOperator tx sent ({tx_hash}) but still shows approved. May not have confirmed."
 
-            return "\n".join([
-                "## Credit Delegation Revoked\n",
-                f"**Facilitator**: {format_address(args['facilitator_address'])}",
-                f"**Transaction**: {tx_hash}",
-                "",
-                "The facilitator can no longer register new borrow intents on your behalf.",
-            ])
+            return "\n".join(
+                [
+                    "## Credit Delegation Revoked\n",
+                    f"**Facilitator**: {format_address(args['facilitator_address'])}",
+                    f"**Transaction**: {tx_hash}",
+                    "",
+                    "The facilitator can no longer register new borrow intents on your behalf.",
+                ]
+            )
         except Exception as e:
             return f"Error revoking delegation: {e}"
 
@@ -433,7 +463,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             if str(on_behalf_of) != _ZERO_ADDRESS:
                 lines.append(f"**Funds Route To**: {format_address(str(on_behalf_of))}")
             if near_expiry:
-                lines.append("\n⚠️ **Delegation expiring soon!** Renew via `grant_credit_delegation`.")
+                lines.append(
+                    "\n⚠️ **Delegation expiring soon!** Renew via `grant_credit_delegation`."
+                )
             if is_expired and approved:
                 lines.append("\n⚠️ **Delegation is expired.** No new borrows can be made.")
 
@@ -453,12 +485,16 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_fetch(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/proxy/fetch", "POST", {
-                "url": args["url"],
-                "method": args.get("method", "GET"),
-                "headers": args.get("headers"),
-                "body": args.get("body"),
-            })
+            resp = self._facilitator_fetch(
+                "/proxy/fetch",
+                "POST",
+                {
+                    "url": args["url"],
+                    "method": args.get("method", "GET"),
+                    "headers": args.get("headers"),
+                    "body": args.get("body"),
+                },
+            )
 
             if resp["status"] >= 400:
                 error = resp["body"].get("error", "Unknown error")
@@ -469,8 +505,14 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 }
                 return error_map.get(error, f"Facilitator error: {error}")
 
-            body_text = json.dumps(resp["body"], indent=2) if isinstance(resp["body"], dict) else str(resp["body"])
-            payment_tx = resp["headers"].get("payment-response") or resp["headers"].get("x-payment-response")
+            body_text = (
+                json.dumps(resp["body"], indent=2)
+                if isinstance(resp["body"], dict)
+                else str(resp["body"])
+            )
+            payment_tx = resp["headers"].get("payment-response") or resp["headers"].get(
+                "x-payment-response"
+            )
 
             lines = ["## Response\n"]
             if payment_tx:
@@ -495,14 +537,16 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             data = resp["body"]
             usdc_decimals = 6
-            return "\n".join([
-                "## x402 Credit Status\n",
-                f"**Credit Limit**: {format_token_amount(int(data.get('creditLimit', '0')), usdc_decimals, 'USDC')}",
-                f"**Credit Used**: {format_token_amount(int(data.get('creditUsed', '0')), usdc_decimals, 'USDC')}",
-                f"**Credit Available**: {format_token_amount(int(data.get('creditAvailable', '0')), usdc_decimals, 'USDC')}",
-                f"**Active Loans**: {len(data.get('activeLoans', []))}",
-                f"**Delegation Active**: {'✅ Yes' if data.get('delegationActive') else '❌ No'}",
-            ])
+            return "\n".join(
+                [
+                    "## x402 Credit Status\n",
+                    f"**Credit Limit**: {format_token_amount(int(data.get('creditLimit', '0')), usdc_decimals, 'USDC')}",
+                    f"**Credit Used**: {format_token_amount(int(data.get('creditUsed', '0')), usdc_decimals, 'USDC')}",
+                    f"**Credit Available**: {format_token_amount(int(data.get('creditAvailable', '0')), usdc_decimals, 'USDC')}",
+                    f"**Active Loans**: {len(data.get('activeLoans', []))}",
+                    f"**Delegation Active**: {'✅ Yes' if data.get('delegationActive') else '❌ No'}",
+                ]
+            )
         except Exception as e:
             return f"Error fetching balance: {e}"
 
@@ -533,9 +577,15 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             usdc_decimals = 6
             lines = ["## Recent Transactions\n"]
             for tx in txns:
-                amount = format_token_amount(int(tx.get("paymentAmountRaw", "0")), usdc_decimals, "USDC") if tx.get("paymentAmountRaw") else "—"
+                amount = (
+                    format_token_amount(int(tx.get("paymentAmountRaw", "0")), usdc_decimals, "USDC")
+                    if tx.get("paymentAmountRaw")
+                    else "—"
+                )
                 status_icon = {"success": "✅", "passthrough": "🔄"}.get(tx.get("status", ""), "❌")
-                lines.append(f"{status_icon} **{tx.get('method', '?')}** {tx.get('targetUrl', '?')}")
+                lines.append(
+                    f"{status_icon} **{tx.get('method', '?')}** {tx.get('targetUrl', '?')}"
+                )
                 lines.append(f"   Amount: {amount} | {tx.get('createdAt', '?')}")
                 if tx.get("x402TxHash"):
                     lines.append(f"   Tx: {tx['x402TxHash']}")
@@ -548,6 +598,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
+
 
 def x402_action_provider(config: X402Config | None = None) -> X402ActionProvider:
     return X402ActionProvider(config)

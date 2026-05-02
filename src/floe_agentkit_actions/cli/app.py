@@ -173,13 +173,9 @@ def run() -> None:
             model = current_config.get("ai_model") or _default_model(
                 current_config.get("ai_provider", "openai")
             )
-            console.print(
-                f"  [bold]AI:[/bold] {current_config.get('ai_provider')} ({model})"
-            )
+            console.print(f"  [bold]AI:[/bold] {current_config.get('ai_provider')} ({model})")
             if current_config.get("ollama_base_url"):
-                console.print(
-                    f"  [bold]Ollama URL:[/bold] {current_config['ollama_base_url']}"
-                )
+                console.print(f"  [bold]Ollama URL:[/bold] {current_config['ollama_base_url']}")
             console.print()
             continue
         if cmd == "save":
@@ -219,12 +215,14 @@ def _run_tool_loop(
                     assistant_content.append({"type": "text", "text": response["content"]})
                 for tc in response["tool_calls"]:
                     console.print(f"[dim]  [Calling {tc['name']}...][/dim]")
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "input": tc["arguments"],
-                    })
+                    assistant_content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc["id"],
+                            "name": tc["name"],
+                            "input": tc["arguments"],
+                        }
+                    )
                 messages.append({"role": "assistant", "content": assistant_content})
 
                 # Execute and add results
@@ -235,15 +233,20 @@ def _run_tool_loop(
                     console.print(
                         f"[dim]  [{tc['name']} done] {preview}{'...' if len(result) > 150 else ''}[/dim]"
                     )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tc["id"],
-                        "content": result,
-                    })
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc["id"],
+                            "content": result,
+                        }
+                    )
                 messages.append({"role": "user", "content": tool_results})
             else:
                 # For OpenAI-compatible: standard tool call format
-                assistant_msg: dict[str, Any] = {"role": "assistant", "content": response.get("content")}
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": response.get("content"),
+                }
                 if response.get("content"):
                     console.print(f"\n[green]Assistant: [/green]{response['content']}")
                 assistant_msg["tool_calls"] = [
@@ -266,11 +269,13 @@ def _run_tool_loop(
                     console.print(
                         f"[dim]  [{tc['name']} done] {preview}{'...' if len(result) > 150 else ''}[/dim]"
                     )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result,
+                        }
+                    )
         else:
             # No tool calls — final text response
             text = response.get("content") or "(action completed)"
@@ -331,7 +336,7 @@ You help users with:
 - Matching intents, repaying loans, managing collateral
 - Liquidating unhealthy positions
 
-Available tools: {', '.join(tool_names)}
+Available tools: {", ".join(tool_names)}
 
 IMPORTANT: Always confirm with the user before executing write operations (posting intents, repaying, liquidating, etc.). Explain what the transaction will do and its parameters before proceeding.
 

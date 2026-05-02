@@ -26,16 +26,17 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-[project.urls]
-Homepage = "https://floelabs.xyz"
-Repository = "https://github.com/Floe-Labs/agentkit-actions-py"
-Documentation = "https://floe-labs.gitbook.io/docs/developers/agent-quickstart"
-
 dependencies = [
     "coinbase-agentkit>=0.7.0",
     "web3>=7.0.0",
     "pydantic>=2.0.0",
+    "eth-utils>=5.0.0",
 ]
+
+[project.urls]
+Homepage = "https://floelabs.xyz"
+Repository = "https://github.com/Floe-Labs/agentkit-actions-py"
+Documentation = "https://floe-labs.gitbook.io/docs/developers/agent-quickstart"
 
 [project.optional-dependencies]
 cli = [
@@ -64,10 +65,11 @@ packages = ["src/floe_agentkit_actions"]
 
 [tool.ruff]
 target-version = "py310"
-line-length = 100
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]  # Long lines are unavoidable in f-string markdown output
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
