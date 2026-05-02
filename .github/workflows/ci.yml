@@ -20,8 +20,11 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install --upgrade pip setuptools wheel
-      - run: pip install "coinbase-agentkit>=0.7.0" "web3>=7.0.0" "pydantic>=2.0.0" "eth-utils>=5.0.0"
-      - run: pip install -e ".[dev]"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install "coinbase-agentkit>=0.7.0" "web3>=7.0.0" "pydantic>=2.0.0" "eth-utils>=5.0.0"
+          pip install -e ".[dev]"
+          python -c "import coinbase_agentkit, pydantic, eth_utils; print('deps ok')"
       - run: ruff check src/
       - run: pytest tests/ -q
