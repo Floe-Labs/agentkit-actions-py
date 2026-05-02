@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import secrets
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
 from coinbase_agentkit import ActionProvider, EvmWalletProvider, create_action
 from coinbase_agentkit.network import Network
+from pydantic import BaseModel, Field, field_validator
 from web3 import Web3
 
 from .constants import (
@@ -20,10 +20,10 @@ from .constants import (
     ERC20_ABI,
 )
 from .utils import (
-    format_bps,
-    format_token_amount,
     format_address,
+    format_bps,
     format_duration,
+    format_token_amount,
 )
 
 # ── ABI fragments for operator functions ────────────────────────────────────
@@ -164,8 +164,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         return network.chain_id in ("8453", "84532")
 
     def _facilitator_fetch(self, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         if not self._facilitator_url:
             raise ValueError("facilitator_url not configured")
