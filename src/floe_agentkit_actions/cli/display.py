@@ -30,7 +30,7 @@ def print_session_info(
     console.print("[dim]" + "\u2500" * 50 + "[/dim]")
     console.print(f"  [bold]Wallet:[/bold]     {address}")
     console.print(f"  [bold]Type:[/bold]       {wallet_type}")
-    console.print(f"  [bold]Network:[/bold]    Base Mainnet")
+    console.print("  [bold]Network:[/bold]    Base Mainnet")
     console.print(f"  [bold]AI:[/bold]         {ai_provider} ({ai_model})")
     console.print(f"  [bold]Tools:[/bold]      {tool_count} actions available")
     console.print("[dim]" + "\u2500" * 50 + "[/dim]")

@@ -7,7 +7,6 @@ flash arbitrage on Base mainnet / Base Sepolia.
 
 from __future__ import annotations
 
-import math
 import secrets
 import time
 from datetime import datetime, timezone
@@ -35,7 +34,6 @@ from .constants import (
     LOG_INTENTS_MATCHED_DETAILED_EVENT,
     LOG_LENDER_OFFER_POSTED_EVENT,
     MATCHER_DEPLOYMENT_BLOCK,
-    ORACLE_PRICE_SCALE,
     PRICE_ORACLE_ABI,
 )
 from .flash_arb_bytecode import (
@@ -431,7 +429,6 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 args=[loan_id],
             )
             interest_amount = int(interest_data[0])
-            time_elapsed = int(interest_data[1])
 
             if loan.repaid:
                 return f"Loan #{args['loan_id']} has been fully repaid. No health check needed."
@@ -1307,7 +1304,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                         f"{format_token_amount(amount_out, out_meta['decimals'], out_meta['symbol'])}"
                     )
                     current_amount = amount_out
-                except Exception as leg_err:
+                except Exception:
                     leg_results.append(
                         f"- **Leg {i + 1}**: {in_meta['symbol']} -> {out_meta['symbol']} -- "
                         f"**Quote failed** (pool may not exist for tick spacing {tick_spacing})"
