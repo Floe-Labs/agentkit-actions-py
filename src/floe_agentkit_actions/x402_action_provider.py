@@ -134,6 +134,73 @@ class X402GetTransactionsSchema(BaseModel):
     limit: str = Field(default="20", description="Number of transactions to return")
 
 
+# ── Agent Awareness schemas ──────────────────────────────────────────────────
+# The 9 actions below let an agent reason about its own credit before
+# committing capital. Identity comes from the configured facilitator_api_key
+# (Bearer), so none of these accept a wallet address parameter.
+
+
+class GetCreditRemainingSchema(BaseModel):
+    pass
+
+
+class GetLoanStateSchema(BaseModel):
+    pass
+
+
+class GetSpendLimitSchema(BaseModel):
+    pass
+
+
+class SetSpendLimitSchema(BaseModel):
+    limit_raw: str = Field(
+        description="Session spend cap in raw USDC units (6 decimals). e.g. '1000000' = $1.",
+    )
+
+    @field_validator("limit_raw")
+    @classmethod
+    def validate_positive_int(cls, v: str) -> str:
+        if not re.match(r"^[1-9]\d*$", v):
+            raise ValueError("Must be a positive integer (raw USDC, 6 decimals)")
+        return v
+
+
+class ClearSpendLimitSchema(BaseModel):
+    pass
+
+
+class ListCreditThresholdsSchema(BaseModel):
+    pass
+
+
+class RegisterCreditThresholdSchema(BaseModel):
+    threshold_bps: int = Field(
+        ge=1,
+        le=10000,
+        description="Utilization threshold in bps (5000 = 50%, 9500 = 95% triggers credit.at_limit).",
+    )
+    webhook_id: Optional[int] = Field(
+        default=None,
+        description="Optional webhook id to pin to (must be owned by this developer). Omit for fanout.",
+    )
+
+
+class DeleteCreditThresholdSchema(BaseModel):
+    id: int = Field(ge=1, description="Threshold subscription id from list_credit_thresholds.")
+
+
+class EstimateX402CostSchema(BaseModel):
+    url: str = Field(description="Target x402-protected URL to preflight.")
+    method: Optional[str] = Field(default=None, description="HTTP method (default GET).")
+
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not re.match(r"^[A-Z]{3,7}$", v):
+            raise ValueError("Method must be 3-7 uppercase letters")
+        return v
+
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 
@@ -545,6 +612,280 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             return "\n".join(lines)
         except Exception as e:
             return f"Error fetching transactions: {e}"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # AGENT AWARENESS (9) — answer "do I have credit?", "is this call worth
+    # it?", "where am I in the loan lifecycle?" before committing capital.
+    # All require facilitator_api_key to be set on the provider config.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── get_credit_remaining ───────────────────────────────────────────────
+
+    @create_action(
+        name="get_credit_remaining",
+        description=(
+            "Return the calling agent's current credit headroom: available USDC, "
+            "headroomToAutoBorrow, utilizationBps, and any active session spend-limit. "
+            "Use BEFORE deciding whether to make a paid call."
+        ),
+        schema=GetCreditRemainingSchema,
+    )
+    def get_credit_remaining(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/agents/credit-remaining")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            usdc = 6
+            lines = [
+                "## Credit Remaining\n",
+                f"**Available**: {format_token_amount(int(d.get('available', '0')), usdc, 'USDC')}",
+                f"**Credit Limit**: {format_token_amount(int(d.get('creditLimit', '0')), usdc, 'USDC')}",
+                f"**Headroom to Auto-Borrow**: {format_token_amount(int(d.get('headroomToAutoBorrow', '0')), usdc, 'USDC')}",
+                f"**Utilization**: {format_bps(int(d.get('utilizationBps', 0)))}",
+            ]
+            if d.get("sessionSpendLimit"):
+                lines.append(
+                    f"**Session Cap**: {format_token_amount(int(d['sessionSpendLimit']), usdc, 'USDC')} "
+                    f"(remaining {format_token_amount(int(d.get('sessionSpendRemaining') or '0'), usdc, 'USDC')})"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error fetching credit-remaining: {e}"
+
+    # ── get_loan_state ─────────────────────────────────────────────────────
+
+    @create_action(
+        name="get_loan_state",
+        description=(
+            "Return the agent's coarse loan state-machine view: idle | borrowing | at_limit | repaying. "
+            "Use to gate actions that only make sense in specific states (e.g. don't spend while at_limit)."
+        ),
+        schema=GetLoanStateSchema,
+    )
+    def get_loan_state(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/agents/loan-state")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            lines = [
+                "## Loan State\n",
+                f"**State**: {d.get('state', 'unknown')}",
+                f"**Reason**: {d.get('reason', '—')}",
+            ]
+            if d.get("details"):
+                lines.append(f"**Details**: {json.dumps(d['details'], indent=2)}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error fetching loan-state: {e}"
+
+    # ── get_spend_limit ────────────────────────────────────────────────────
+
+    @create_action(
+        name="get_spend_limit",
+        description=(
+            "Return the agent's currently-active session spend cap, if any. "
+            "Returns inactive when no cap is set."
+        ),
+        schema=GetSpendLimitSchema,
+    )
+    def get_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/agents/spend-limit")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            if not d.get("active"):
+                return "## Spend Limit\n\nNo session spend cap set."
+            usdc = 6
+            return "\n".join([
+                "## Spend Limit\n",
+                f"**Cap**: {format_token_amount(int(d.get('limitRaw') or '0'), usdc, 'USDC')}",
+                f"**Spent this session**: {format_token_amount(int(d.get('sessionSpentRaw') or '0'), usdc, 'USDC')}",
+                f"**Remaining**: {format_token_amount(int(d.get('sessionRemainingRaw') or '0'), usdc, 'USDC')}",
+            ])
+        except Exception as e:
+            return f"Error fetching spend-limit: {e}"
+
+    # ── set_spend_limit ────────────────────────────────────────────────────
+
+    @create_action(
+        name="set_spend_limit",
+        description=(
+            "Set or update the agent's session spend cap (raw USDC, 6 decimals). Resets the session "
+            "window — anything spent before this call no longer counts. Operator-defined; distinct "
+            "from the on-chain creditLimit."
+        ),
+        schema=SetSpendLimitSchema,
+    )
+    def set_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch(
+                "/agents/spend-limit",
+                method="PUT",
+                body={"limitRaw": args["limit_raw"]},
+            )
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            return "\n".join([
+                "## Spend Limit Set\n",
+                f"**Cap**: {format_token_amount(int(d.get('limitRaw', '0')), 6, 'USDC')}",
+                f"**Session Started**: {d.get('sessionStartedAt', '—')}",
+            ])
+        except Exception as e:
+            return f"Error setting spend-limit: {e}"
+
+    # ── clear_spend_limit ──────────────────────────────────────────────────
+
+    @create_action(
+        name="clear_spend_limit",
+        description=(
+            "Remove the agent's session spend cap. Subsequent paid calls will only be bounded "
+            "by the on-chain creditLimit."
+        ),
+        schema=ClearSpendLimitSchema,
+    )
+    def clear_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/agents/spend-limit", method="DELETE")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            return "## Spend Limit Cleared\n\nNo cap is now active."
+        except Exception as e:
+            return f"Error clearing spend-limit: {e}"
+
+    # ── list_credit_thresholds ─────────────────────────────────────────────
+
+    @create_action(
+        name="list_credit_thresholds",
+        description=(
+            "List the agent's registered credit-utilization thresholds. Each fires a "
+            "credit.warning / credit.at_limit / credit.recovered webhook when crossed."
+        ),
+        schema=ListCreditThresholdsSchema,
+    )
+    def list_credit_thresholds(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/agents/credit-thresholds")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            subs = resp["body"].get("subscriptions", [])
+            if not subs:
+                return "## Credit Thresholds\n\nNone registered."
+            lines = ["## Credit Thresholds\n"]
+            for s in subs:
+                line = (
+                    f"**#{s.get('id')}** {format_bps(int(s.get('thresholdBps', 0)))} — "
+                    f"state: {s.get('lastState', 'below')}"
+                )
+                if s.get("webhookId") is not None:
+                    line += f" (pinned webhook {s['webhookId']})"
+                if s.get("lastFiredAt"):
+                    line += f" (last fired {s['lastFiredAt']})"
+                lines.append(line)
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing thresholds: {e}"
+
+    # ── register_credit_threshold ──────────────────────────────────────────
+
+    @create_action(
+        name="register_credit_threshold",
+        description=(
+            "Register a credit-utilization threshold. When utilizationBps crosses thresholdBps "
+            "from below, the agent's webhook receives credit.warning (or credit.at_limit if >= 9500). "
+            "Drops below → credit.recovered. Cap of 20 thresholds per agent."
+        ),
+        schema=RegisterCreditThresholdSchema,
+    )
+    def register_credit_threshold(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            body: dict[str, Any] = {"thresholdBps": args["threshold_bps"]}
+            if args.get("webhook_id") is not None:
+                body["webhookId"] = args["webhook_id"]
+            resp = self._facilitator_fetch("/agents/credit-thresholds", method="POST", body=body)
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            tail = (
+                f" (pinned webhook {d['webhookId']})"
+                if d.get("webhookId") is not None
+                else " (fanout to all credit.* webhooks)"
+            )
+            return "\n".join([
+                "## Credit Threshold Registered\n",
+                f"**#{d.get('id')}** at {format_bps(int(d.get('thresholdBps', 0)))} — state: {d.get('lastState', 'below')}{tail}",
+            ])
+        except Exception as e:
+            return f"Error registering threshold: {e}"
+
+    # ── delete_credit_threshold ────────────────────────────────────────────
+
+    @create_action(
+        name="delete_credit_threshold",
+        description="Delete one of the agent's credit-utilization thresholds by id (from list_credit_thresholds).",
+        schema=DeleteCreditThresholdSchema,
+    )
+    def delete_credit_threshold(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch(
+                f"/agents/credit-thresholds/{args['id']}",
+                method="DELETE",
+            )
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            return f"## Credit Threshold Deleted\n\nThreshold #{args['id']} removed."
+        except Exception as e:
+            return f"Error deleting threshold: {e}"
+
+    # ── estimate_x402_cost ─────────────────────────────────────────────────
+
+    @create_action(
+        name="estimate_x402_cost",
+        description=(
+            "Preflight an x402-protected URL and return its USDC cost without paying. Reflects "
+            "against the calling agent's available credit and session spend-limit so you can decide "
+            "gating in one round-trip. Use BEFORE x402_fetch."
+        ),
+        schema=EstimateX402CostSchema,
+    )
+    def estimate_x402_cost(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            body: dict[str, Any] = {"url": args["url"]}
+            if args.get("method"):
+                body["method"] = args["method"]
+            resp = self._facilitator_fetch("/x402/estimate", method="POST", body=body)
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            method = d.get("method", "GET")
+            url = d.get("url", "")
+            if not d.get("x402"):
+                return f"## x402 Estimate\n\n**{method} {url}** is not x402-protected — no payment required."
+            usdc = 6
+            lines = [
+                "## x402 Estimate\n",
+                f"**{method} {url}**",
+                f"**Price**: {format_token_amount(int(d.get('priceRaw', '0')), usdc, 'USDC')}",
+                f"**Network**: {d.get('network', '—')}",
+                f"**Pay To**: {format_address(d['payTo']) if d.get('payTo') else '—'}",
+                f"**Cached**: {'yes' if d.get('cached') else 'no'}",
+            ]
+            r = d.get("reflection")
+            if r:
+                lines.extend([
+                    "",
+                    "### Decision",
+                    f"**Available**: {format_token_amount(int(r.get('available', '0')), usdc, 'USDC')}",
+                    f"**Would exceed available?**: {'YES — DO NOT CALL' if r.get('willExceedAvailable') else 'no'}",
+                    f"**Would exceed auto-borrow headroom?**: {'YES' if r.get('willExceedHeadroom') else 'no'}",
+                    f"**Would exceed session spend-limit?**: {'YES — DO NOT CALL' if r.get('willExceedSpendLimit') else 'no'}",
+                ])
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error estimating cost: {e}"
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────

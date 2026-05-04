@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.xyz) credit protocol on Base. **36 actions** for lending, borrowing, flash loans, and x402 credit delegation.
+Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.xyz) credit protocol on Base. **45 actions** for lending, borrowing, flash loans, x402 credit delegation, and agent-awareness primitives (credit, spend-limit, thresholds, x402 cost preflight).
 
 ### 5-Second Example
 
@@ -13,7 +13,7 @@ Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.x
 from floe_agentkit_actions import floe_action_provider
 
 provider = floe_action_provider()
-# Borrow, check, repay, rollover -- same 36 actions as TypeScript
+# Borrow, check, repay, rollover -- same 45 actions as TypeScript
 ```
 
 ## Installation
@@ -55,7 +55,7 @@ result = floe.get_price(wallet_provider, {
 print(result)
 ```
 
-## Actions (36 total: 30 lending + 6 x402)
+## Actions (45 total: 30 lending + 6 x402 + 9 agent-awareness)
 
 ### Read Actions (8)
 
@@ -122,6 +122,24 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 | `x402_fetch` | Fetch a URL with automatic x402 payment handling |
 | `x402_get_balance` | Check x402 credit balance |
 | `x402_get_transactions` | List recent x402 payment transactions |
+
+### Agent Awareness Actions (9)
+
+Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require `facilitator_api_key` to be configured on the provider.
+
+| Action | Description |
+|--------|-------------|
+| `get_credit_remaining` | Available USDC, headroom to auto-borrow, utilization in bps, session-cap state |
+| `get_loan_state` | Coarse state machine: `idle` \| `borrowing` \| `at_limit` \| `repaying` |
+| `get_spend_limit` | Currently active session spend cap, if any |
+| `set_spend_limit` | Set a session-level USDC ceiling (resets the session window) |
+| `clear_spend_limit` | Remove the session spend cap |
+| `list_credit_thresholds` | List registered credit-utilization webhook triggers |
+| `register_credit_threshold` | Register a webhook trigger at a utilization threshold (cap: 20 per agent) |
+| `delete_credit_threshold` | Remove a registered threshold |
+| `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
+
+> **Decision-loop pattern:** call `estimate_x402_cost` → check `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
 
 ## CLI
 

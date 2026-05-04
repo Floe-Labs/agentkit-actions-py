@@ -4,17 +4,22 @@ Validates that both providers export the expected number of actions, and
 asserts that the Python port remains at full parity with the TypeScript
 reference (`agentkit-actions`).
 
-Current state (commit 854fd92, April 2026):
+Current state (May 2026 — agent-awareness primitives added):
 
-- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=6 = 36
-- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=6 = 36
+- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=15 = 45
+- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=15 = 45
 
-Parity achieved — PARITY_GAP = 0.
+X402ActionProvider gained 9 agent-awareness actions (get_credit_remaining,
+get_loan_state, {get,set,clear}_spend_limit,
+{list,register,delete}_credit_threshold, estimate_x402_cost) that wrap the
+new /v1/agents/* and /v1/x402/estimate REST endpoints on the Floe API.
+
+Parity maintained — PARITY_GAP = 0.
 
 If either provider's action count changes, update the constants below.
 If parity breaks (Python drifts behind TypeScript), fix the port — do not
 just bump PARITY_GAP to hide the drift. The docs at floe-labs-docs claim
-"36 actions in both TypeScript and Python" — keep that true.
+"45 actions in both TypeScript and Python" — keep that true.
 """
 
 from __future__ import annotations
@@ -28,11 +33,11 @@ from floe_agentkit_actions.x402_action_provider import X402ActionProvider
 #       floe-labs-docs if the combined total changed
 #   (b) Someone removed an action — investigate whether that was intentional
 FLOE_PROVIDER_ACTION_COUNT = 30  # full TS parity: 23 base + 7 credit-facility
-X402_PROVIDER_ACTION_COUNT = 6
-TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 36
+X402_PROVIDER_ACTION_COUNT = 15  # 6 x402 delegation + 9 agent-awareness
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 45
 
 # The TypeScript reference port. Gap = TS - Python. Closed.
-TS_REFERENCE_TOTAL = 36
+TS_REFERENCE_TOTAL = 45
 PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0
 
 
