@@ -55,7 +55,7 @@ result = floe.get_price(wallet_provider, {
 print(result)
 ```
 
-## Actions (45 total: 30 lending + 6 x402 + 9 agent-awareness)
+## Actions (45 total)
 
 ### Read Actions (8)
 
