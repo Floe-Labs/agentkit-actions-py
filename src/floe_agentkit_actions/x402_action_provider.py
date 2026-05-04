@@ -181,6 +181,7 @@ class RegisterCreditThresholdSchema(BaseModel):
     )
     webhook_id: Optional[int] = Field(
         default=None,
+        ge=1,
         description="Optional webhook id to pin to (must be owned by this developer). Omit for fanout.",
     )
 
