@@ -400,19 +400,35 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 )
             else:
                 # Read once: the bounded path uses this for the force-set
-                # decision, and the neither-set path renders it back to the
-                # caller. Reuses `agent_address` from earlier in the handler
-                # to avoid a redundant get_address() call.
-                current_allowance = int(
-                    wallet_provider.read_contract(
-                        contract_address=args["collateral_token"],
-                        abi=ERC20_ABI,
-                        function_name="allowance",
-                        args=[agent_address, self._matcher_address],
+                # decision (skip approve tx when current already equals
+                # requested), and the neither-set path renders it back to
+                # the caller. Reuses `agent_address` from earlier in the
+                # handler to avoid a redundant get_address() call.
+                #
+                # The read is non-essential — if a transient RPC error fails
+                # it AFTER setOperator has already landed on-chain, we must
+                # not abort the whole grant: the caller would never reach
+                # /agents/register, never get their API key, and would have
+                # to manually revoke an active on-chain delegation.
+                #   Bounded path: send approve(requested) unconditionally
+                #     — the read failure means we can't decide whether to
+                #     skip, and over-sending an approve at the same value
+                #     is at worst a tiny gas cost.
+                #   Neither-set path: response renders "unknown" via the
+                #     existing branch in the message-formatting code.
+                try:
+                    current_allowance = int(
+                        wallet_provider.read_contract(
+                            contract_address=args["collateral_token"],
+                            abi=ERC20_ABI,
+                            function_name="allowance",
+                            args=[agent_address, self._matcher_address],
+                        )
                     )
-                )
+                except Exception:
+                    current_allowance = None
                 if requested_collateral_approval is not None:
-                    if current_allowance != requested_collateral_approval:
+                    if current_allowance is None or current_allowance != requested_collateral_approval:
                         erc20 = _w3.eth.contract(abi=ERC20_ABI)
                         encoded_approve = erc20.encode_abi(
                             "approve", args=[self._matcher_address, requested_collateral_approval]
@@ -420,8 +436,13 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                         approve_tx = wallet_provider.send_transaction(
                             transaction={"to": args["collateral_token"], "data": encoded_approve}
                         )
-            approval_requested = (
-                args.get("unsafe_infinite_approval") is True or args.get("collateral_approval") is not None
+            # Truthy on both sides for consistency with line 359
+            # (`if args.get("unsafe_infinite_approval"):`). An earlier
+            # version mixed truthy here and `is True` below, which would
+            # diverge if a non-bool truthy value (e.g. 1) ever bypassed
+            # schema validation.
+            approval_requested = bool(
+                args.get("unsafe_infinite_approval") or args.get("collateral_approval") is not None
             )
 
             # Step 4: Register

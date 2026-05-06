@@ -335,6 +335,71 @@ def test_both_flags_set_returns_error_without_side_effects() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Allowance read failure must not abort the grant after setOperator
+# has already landed on-chain. The read is purely informational —
+# bounded path: send approve(requested) unconditionally on failure;
+# neither-set path: render "unknown" in the response and continue to
+# /agents/register so the caller still gets their API key.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class _TransientReadFailureWallet(SpyWallet):
+    """SpyWallet variant whose `read_contract` always raises — simulates
+    a transient RPC error reading the matcher allowance."""
+
+    def read_contract(self, **kwargs: Any) -> Any:
+        if kwargs.get("function_name") == "allowance":
+            raise RuntimeError("simulated transient RPC error reading allowance")
+        return super().read_contract(**kwargs)
+
+
+def test_neither_flag_with_allowance_read_failure_still_completes_grant() -> None:
+    """If the (purely informational) allowance read on the neither-set path
+    fails AFTER setOperator has already landed on-chain, the action MUST
+    still complete and reach /agents/register so the caller gets their
+    API key. Aborting here would leave an active on-chain delegation that
+    the caller has to manually revoke and a Privy state on the facilitator
+    they can't recover from."""
+    provider = _make_provider()
+    wallet = _TransientReadFailureWallet()
+    args = dict(_BASE_ARGS)
+
+    with patch.object(provider, "_facilitator_fetch", side_effect=_mock_facilitator_fetch):
+        result = provider.grant_credit_delegation(wallet, args)
+
+    assert "Credit Delegation Granted" in result, f"action did not complete: {result}"
+    assert "Error" not in result, f"unexpected error: {result}"
+    # Allowance read failed — response should render "unknown" rather than
+    # crashing or omitting the line entirely.
+    assert "unknown" in result.lower(), f"expected 'unknown' allowance rendering after read failure, got:\n{result}"
+    # No approve tx targeted the collateral token (neither flag set).
+    assert _approve_txs(wallet, _BASE_ARGS["collateral_token"]) == []
+
+
+def test_bounded_path_with_allowance_read_failure_still_sends_approve() -> None:
+    """If the allowance read on the bounded path fails, we can't decide
+    whether to skip — but we MUST honor the caller's bound. Send the
+    approve unconditionally; over-sending an approve at the same value
+    is at worst a tiny gas cost, while skipping it would leave the caller
+    with an unbounded allowance after they explicitly asked to bound it."""
+    bounded = 12_345
+    provider = _make_provider()
+    wallet = _TransientReadFailureWallet()
+    args = dict(_BASE_ARGS, collateral_approval=str(bounded))
+
+    with patch.object(provider, "_facilitator_fetch", side_effect=_mock_facilitator_fetch):
+        result = provider.grant_credit_delegation(wallet, args)
+
+    assert "Credit Delegation Granted" in result
+    assert "Error" not in result
+
+    approves = _approve_txs(wallet, _BASE_ARGS["collateral_token"])
+    assert len(approves) == 1, f"expected approve(requested) on read-failure, got {len(approves)}"
+    _, amount = _decode_approve(approves[0]["data"])
+    assert amount == bounded, f"expected approve(requested={bounded}), got {amount}"
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Schema acceptance: all four combinations are valid at the schema layer.
 # Mutual exclusion is enforced in the handler so existing callers keep
 # working at the framework boundary.
