@@ -77,6 +77,18 @@ _w3 = Web3()
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _ADDRESS_PATTERN = r"^0x[a-fA-F0-9]{40}$"
 
+# Whitelisted collateral tokens. Mirrors agentkit-actions (TypeScript)'s
+# KNOWN_COLLATERAL set. Restricting to these two specifically lets the
+# bounded-approval handler skip the USDT-style approve(0)-first dance —
+# both WETH and cbBTC are standard ERC-20s that accept a direct
+# approve(N) regardless of the prior allowance.
+_KNOWN_COLLATERAL: frozenset[str] = frozenset(
+    {
+        "0x4200000000000000000000000000000000000006",  # WETH on Base
+        "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",  # cbBTC on Base
+    }
+)
+
 
 def _validate_address(v: str) -> str:
     if not re.match(_ADDRESS_PATTERN, v):
@@ -113,10 +125,18 @@ class GrantCreditDelegationSchema(BaseModel):
         ),
     )
 
-    @field_validator("facilitator_address", "collateral_token")
+    @field_validator("facilitator_address")
     @classmethod
-    def validate_addresses(cls, v: str) -> str:
+    def validate_facilitator_address(cls, v: str) -> str:
         return _validate_address(v)
+
+    @field_validator("collateral_token")
+    @classmethod
+    def validate_collateral_token(cls, v: str) -> str:
+        addr = _validate_address(v)
+        if addr.lower() not in _KNOWN_COLLATERAL:
+            raise ValueError("Must be WETH or cbBTC")
+        return addr
 
 
 class RevokeCreditDelegationSchema(BaseModel):
@@ -273,6 +293,14 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
                 max_rate_bps = int(args["max_rate_bps"])
                 expiry_days = int(args["expiry_days"])
+                # Parse collateral_approval upfront too. Previously this was
+                # parsed in Step 3 — after pre-register and setOperator had
+                # already happened — so a non-numeric, negative, or oversized
+                # value would only surface as a generic catch-all error after
+                # irreversible facilitator/on-chain side effects had landed.
+                requested_collateral_approval: Optional[int] = (
+                    int(args["collateral_approval"]) if args.get("collateral_approval") is not None else None
+                )
             except KeyError as e:
                 return f"Invalid delegation input: missing required field {e.args[0]!r}"
             except (InvalidOperation, TypeError, ValueError) as e:
@@ -286,6 +314,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 return f"max_rate_bps must be positive, got {max_rate_bps}."
             if expiry_days <= 0:
                 return f"expiry_days must be positive, got {expiry_days}."
+            if requested_collateral_approval is not None and requested_collateral_approval < 0:
+                return f"collateral_approval must be non-negative, got '{args['collateral_approval']}'."
             scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
             if scaled != scaled.to_integral_value():
                 return (
@@ -297,13 +327,17 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             # Bound-check against uint256 before encoding calldata. Python's
             # arbitrary-precision int otherwise lets oversized inputs through
             # local validation only to fail later at ABI encode time with a
-            # less-actionable error. All three fields are uint256 in OPERATOR_ABI.
+            # less-actionable error. All four fields are uint256 in
+            # OPERATOR_ABI / the ERC-20 approve interface.
             max_uint256 = (1 << 256) - 1
-            for field_name, value in (
+            uint256_checks: list[tuple[str, int]] = [
                 ("borrow_limit", borrow_limit_raw),
                 ("max_rate_bps", max_rate_bps),
                 ("expiry", expiry_ts),
-            ):
+            ]
+            if requested_collateral_approval is not None:
+                uint256_checks.append(("collateral_approval", requested_collateral_approval))
+            for field_name, value in uint256_checks:
                 if value > max_uint256:
                     return f"{field_name} is too large for uint256 ({value})."
 
@@ -377,11 +411,12 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                         args=[agent_address, self._matcher_address],
                     )
                 )
-                if args.get("collateral_approval") is not None:
-                    requested = int(args["collateral_approval"])
-                    if current_allowance != requested:
+                if requested_collateral_approval is not None:
+                    if current_allowance != requested_collateral_approval:
                         erc20 = _w3.eth.contract(abi=ERC20_ABI)
-                        encoded_approve = erc20.encode_abi("approve", args=[self._matcher_address, requested])
+                        encoded_approve = erc20.encode_abi(
+                            "approve", args=[self._matcher_address, requested_collateral_approval]
+                        )
                         approve_tx = wallet_provider.send_transaction(
                             transaction={"to": args["collateral_token"], "data": encoded_approve}
                         )

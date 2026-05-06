@@ -356,3 +356,77 @@ def test_schema_accepts_all_approval_combinations(extra: dict[str, Any]) -> None
     the mutual-exclusion contract. Validates we did not accidentally tighten
     the schema and break callers who never set either field."""
     GrantCreditDelegationSchema(**dict(_BASE_ARGS, **extra))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Schema rejects collateral_token outside the WETH/cbBTC whitelist.
+# The bounded-approval handler relies on this restriction to skip the
+# USDT-style approve(0)-first dance — if the whitelist isn't enforced, a
+# caller could pass a token that reverts on direct approve(N) and end up
+# with the facilitator delegation set on-chain but no working approval.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_schema_rejects_unknown_collateral_token() -> None:
+    from pydantic import ValidationError
+
+    bad_token = "0xdeadbeef00000000000000000000000000000001"
+    with pytest.raises(ValidationError) as excinfo:
+        GrantCreditDelegationSchema(**dict(_BASE_ARGS, collateral_token=bad_token))
+    assert "WETH" in str(excinfo.value) or "cbBTC" in str(excinfo.value), (
+        f"expected whitelist error mentioning the allowed tokens, got: {excinfo.value}"
+    )
+
+
+def test_schema_accepts_weth_and_cbbtc() -> None:
+    weth = "0x4200000000000000000000000000000000000006"
+    cbbtc = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    GrantCreditDelegationSchema(**dict(_BASE_ARGS, collateral_token=weth))
+    GrantCreditDelegationSchema(**dict(_BASE_ARGS, collateral_token=cbbtc))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Malformed `collateral_approval` values must be rejected BEFORE any
+# facilitator pre-register or on-chain setOperator. Previously the parse
+# happened in Step 3, so a bad value would only surface after the
+# delegation was already set on-chain — leaving the caller to manually
+# revoke. The fix moves parse + range check into the existing local
+# validation block.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "bad_value, message_substring",
+    [
+        ("abc", "Invalid delegation input"),
+        ("-5", "non-negative"),
+        ("1.5", "Invalid delegation input"),
+        # > uint256 max: 2**256, just past the limit.
+        (str(1 << 256), "uint256"),
+    ],
+    ids=["non_numeric", "negative", "fractional", "overflow"],
+)
+def test_invalid_collateral_approval_fails_fast_without_side_effects(bad_value: str, message_substring: str) -> None:
+    provider = _make_provider()
+    wallet = SpyWallet(current_allowance=0)
+    args = dict(_BASE_ARGS, collateral_approval=bad_value)
+
+    facilitator_calls: list[str] = []
+
+    def tracking_fetch(path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
+        facilitator_calls.append(path)
+        return _mock_facilitator_fetch(path, method, body)
+
+    with patch.object(provider, "_facilitator_fetch", side_effect=tracking_fetch):
+        result = provider.grant_credit_delegation(wallet, args)
+
+    # Bad input must be caught before any side effects land.
+    assert wallet.sent == [], (
+        f"no transactions should be sent for invalid collateral_approval={bad_value!r}; got {wallet.sent}"
+    )
+    assert facilitator_calls == [], (
+        f"no facilitator calls should be made for invalid collateral_approval={bad_value!r}; got {facilitator_calls}"
+    )
+    assert message_substring.lower() in result.lower(), (
+        f"expected error mentioning {message_substring!r}, got: {result}"
+    )
