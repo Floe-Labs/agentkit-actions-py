@@ -5,7 +5,11 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.xyz) credit protocol on Base. **45 actions** for lending, borrowing, flash loans, x402 credit delegation, and agent-awareness primitives (credit, spend-limit, thresholds, x402 cost preflight).
+Working capital for AI agents on Base. Deposit USDC, borrow up to 95% — fixed rates, gas-free, no crypto complexity.
+
+**3,000+ secured working capital lines issued. Zero defaults.**
+
+Coinbase AgentKit ActionProvider for [Floe](https://dev-dashboard.floelabs.xyz). **45 actions** for USDC/USDC credit lines, volatile-collateral lending (WETH, cbBTC), flash loans, x402 credit delegation, and agent-awareness primitives (credit, spend-limit, thresholds, x402 cost preflight).
 
 ### 5-Second Example
 
@@ -13,7 +17,14 @@ Coinbase AgentKit ActionProvider for the [Floe](https://dev-dashboard.floelabs.x
 from floe_agentkit_actions import floe_action_provider
 
 provider = floe_action_provider()
-# Borrow, check, repay, rollover -- same 45 actions as TypeScript
+
+# Deposit 10,000 USDC, borrow 9,500 USDC — same-token market, no price risk
+result = provider.instant_borrow(wallet_provider, {
+    "borrow_amount": "9500000000",
+    "collateral_amount": "10000000000",
+    "max_interest_rate_bps": "800",
+    "duration": "1209600",
+})
 ```
 
 ## Installation
@@ -27,6 +38,8 @@ pip install "floe-agentkit-actions[cli]"
 # With LangChain integration
 pip install "floe-agentkit-actions[langchain]"
 ```
+
+> **Fund with fiat:** Agents (or their operators) can fund wallets with USDC via Coinbase — credit card or bank transfer — directly from the [Floe dashboard](https://dev-dashboard.floelabs.xyz). No crypto on-ramp needed.
 
 ## Quick Start
 
@@ -137,9 +150,9 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 | `list_credit_thresholds` | List registered credit-utilization webhook triggers |
 | `register_credit_threshold` | Register a webhook trigger at a utilization threshold (cap: 20 per agent) |
 | `delete_credit_threshold` | Remove a registered threshold |
-| `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
+| `estimate_x402_cost` | Preflight an x402 URL -- returns cost + reflection against your credit (no payment) |
 
-> **Decision-loop pattern:** call `estimate_x402_cost` → check `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
+> **Decision-loop pattern:** call `estimate_x402_cost` -> check `willExceedAvailable` / `willExceedSpendLimit` -> conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
 
 ## CLI
 
@@ -211,7 +224,7 @@ pytest
 
 ## Links
 
-- [Website](https://dev-dashboardfloelabs.xyz)
+- [Website](https://dev-dashboard.floelabs.xyz)
 - [Documentation](https://floe-labs.gitbook.io/docs)
 - [TypeScript counterpart (floe-agent)](https://github.com/floelabs/agentkit-actions)
 - [MCP Server (@floelabs/mcp-server)](https://github.com/floelabs/floe-mcp-server)
