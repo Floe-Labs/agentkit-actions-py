@@ -36,6 +36,12 @@ MARKET_PAIRS: list[dict[str, str]] = [
         "collateral": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
         "label": "USDT/cbBTC",
     },
+    {
+        # Same-token market (USDC/USDC) — protocol envelope is 50 bps gap, up to 9950 bps LTV.
+        "loan": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "collateral": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "label": "USDC/USDC",
+    },
 ]
 
 
