@@ -173,11 +173,12 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
     @create_action(
         name="get_markets",
         description=(
-            "Get information about Floe lending markets. Each market represents a unique "
-            "loan token + collateral token pair with its own interest rate floor, LTV limits, "
-            "and liquidation incentive. Unlike Aave/Compound pool-based lending, Floe markets "
-            "are intent-based — lenders and borrowers post offers that get matched at fixed "
-            "rates and terms."
+            "Get information about Floe lending markets. Each market is a loan token + "
+            "collateral token pair (which may be the same token, e.g. USDC/USDC) with its own "
+            "interest rate floor, LTV limits, and liquidation incentive. Same-token markets "
+            "allow LTVs up to 99.5% with a 50bps gap; cross-asset markets cap at 95% with an "
+            "800bps gap. Unlike Aave/Compound pool-based lending, Floe markets are intent-based "
+            "— lenders and borrowers post offers that get matched at fixed rates and terms."
         ),
         schema=GetMarketsSchema,
     )
