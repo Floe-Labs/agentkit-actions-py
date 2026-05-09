@@ -77,6 +77,18 @@ _w3 = Web3()
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _ADDRESS_PATTERN = r"^0x[a-fA-F0-9]{40}$"
 
+# Whitelisted collateral tokens. Mirrors agentkit-actions (TypeScript)'s
+# KNOWN_COLLATERAL set. Restricting to these two specifically lets the
+# bounded-approval handler skip the USDT-style approve(0)-first dance —
+# both WETH and cbBTC are standard ERC-20s that accept a direct
+# approve(N) regardless of the prior allowance.
+_KNOWN_COLLATERAL: frozenset[str] = frozenset(
+    {
+        "0x4200000000000000000000000000000000000006",  # WETH on Base
+        "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",  # cbBTC on Base
+    }
+)
+
 
 def _validate_address(v: str) -> str:
     if not re.match(_ADDRESS_PATTERN, v):
@@ -94,11 +106,37 @@ class GrantCreditDelegationSchema(BaseModel):
     max_rate_bps: str = Field(default="1500", description="Maximum interest rate in basis points")
     expiry_days: str = Field(default="90", description="Number of days until delegation expires")
     collateral_token: str = Field(description="Collateral token address (WETH or cbBTC)")
+    collateral_approval: Optional[str] = Field(
+        default=None,
+        description=(
+            "Bounded collateral allowance to grant the matcher (raw token units). "
+            "Mutually exclusive with `unsafe_infinite_approval`. "
+            "If neither field is set, no approve tx is sent — the action returns "
+            "the current matcher allowance in its response so the caller can decide "
+            "whether to grant one externally via their wallet provider."
+        ),
+    )
+    unsafe_infinite_approval: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Opt in to unlimited (type(uint256).max) collateral approval to the matcher. "
+            "Saves one approve() per top-up but means a matcher compromise can drain "
+            "your full collateral token balance. Mutually exclusive with `collateral_approval`."
+        ),
+    )
 
-    @field_validator("facilitator_address", "collateral_token")
+    @field_validator("facilitator_address")
     @classmethod
-    def validate_addresses(cls, v: str) -> str:
+    def validate_facilitator_address(cls, v: str) -> str:
         return _validate_address(v)
+
+    @field_validator("collateral_token")
+    @classmethod
+    def validate_collateral_token(cls, v: str) -> str:
+        addr = _validate_address(v)
+        if addr.lower() not in _KNOWN_COLLATERAL:
+            raise ValueError("Must be WETH or cbBTC")
+        return addr
 
 
 class RevokeCreditDelegationSchema(BaseModel):
@@ -290,13 +328,23 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         description=(
             "Grant credit delegation to an x402 facilitator. This allows the facilitator to borrow "
             "USDC on your behalf using your collateral. You set a maximum borrow limit, interest rate "
-            "cap, and expiry. This action handles pre-registration, setOperator, collateral approval, "
-            "and registration in one step."
+            "cap, and expiry. This action: (1) pre-registers with the facilitator, (2) calls "
+            "setOperator on the lending contract, (3) optionally approves the collateral token to "
+            "the matcher (controlled by `collateral_approval` or `unsafe_infinite_approval` — "
+            "neither is set by default; the response reports whether an approve tx was sent and the "
+            "current matcher allowance), (4) completes registration with the facilitator."
         ),
         schema=GrantCreditDelegationSchema,
     )
     def grant_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
+            # Reject incoherent approval combinations before any side effects
+            # (no facilitator pre-register, no on-chain setOperator). The
+            # schema accepts both fields so existing callers don't get a
+            # validation error from the framework; the choice is enforced here.
+            if args.get("collateral_approval") is not None and args.get("unsafe_infinite_approval"):
+                return "Cannot set both `collateral_approval` and `unsafe_infinite_approval` — pick one."
+
             # Validate local inputs BEFORE hitting the facilitator. A
             # malformed borrow_limit / max_rate_bps / expiry_days previously
             # would still trigger /agents/pre-register (creating Privy
@@ -313,6 +361,14 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
                 max_rate_bps = int(args["max_rate_bps"])
                 expiry_days = int(args["expiry_days"])
+                # Parse collateral_approval upfront too. Previously this was
+                # parsed in Step 3 — after pre-register and setOperator had
+                # already happened — so a non-numeric, negative, or oversized
+                # value would only surface as a generic catch-all error after
+                # irreversible facilitator/on-chain side effects had landed.
+                requested_collateral_approval: Optional[int] = (
+                    int(args["collateral_approval"]) if args.get("collateral_approval") is not None else None
+                )
             except KeyError as e:
                 return f"Invalid delegation input: missing required field {e.args[0]!r}"
             except (InvalidOperation, TypeError, ValueError) as e:
@@ -326,6 +382,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 return f"max_rate_bps must be positive, got {max_rate_bps}."
             if expiry_days <= 0:
                 return f"expiry_days must be positive, got {expiry_days}."
+            if requested_collateral_approval is not None and requested_collateral_approval < 0:
+                return f"collateral_approval must be non-negative, got '{args['collateral_approval']}'."
             scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
             if scaled != scaled.to_integral_value():
                 return (
@@ -337,13 +395,17 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             # Bound-check against uint256 before encoding calldata. Python's
             # arbitrary-precision int otherwise lets oversized inputs through
             # local validation only to fail later at ABI encode time with a
-            # less-actionable error. All three fields are uint256 in OPERATOR_ABI.
+            # less-actionable error. All four fields are uint256 in
+            # OPERATOR_ABI / the ERC-20 approve interface.
             max_uint256 = (1 << 256) - 1
-            for field_name, value in (
+            uint256_checks: list[tuple[str, int]] = [
                 ("borrow_limit", borrow_limit_raw),
                 ("max_rate_bps", max_rate_bps),
                 ("expiry", expiry_ts),
-            ):
+            ]
+            if requested_collateral_approval is not None:
+                uint256_checks.append(("collateral_approval", requested_collateral_approval))
+            for field_name, value in uint256_checks:
                 if value > max_uint256:
                     return f"{field_name} is too large for uint256 ({value})."
 
@@ -375,10 +437,80 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 transaction={"to": self._matcher_address, "data": encoded}
             )
 
-            # Step 3: Approve collateral (max approval — agent controls via delegation limits)
-            approval_amount = 2**256 - 1  # type(uint256).max
-            approve_tx = self._ensure_allowance(
-                wallet_provider, args["collateral_token"], self._matcher_address, approval_amount,
+            # Step 3: Approve collateral. The approve step is skipped unless
+            # the caller opts in explicitly. Previously this defaulted to
+            # type(uint256).max, which silently granted the matcher unlimited
+            # spend power on every delegation grant. Now the caller picks one of:
+            #   unsafe_infinite_approval=True → MAX_UINT256 (at-least semantics — no tx if already MAX)
+            #   collateral_approval=<raw>     → set to exactly this amount (force-set, including DOWN)
+            #   neither set                   → no approve tx; the response reports the current
+            #                                   matcher allowance so the caller knows whether their
+            #                                   wallet is already bounded or still has a stale
+            #                                   infinite grant from the old default
+            #
+            # The bounded path force-sets rather than using `_ensure_allowance`'s
+            # at-least semantics: a caller migrating from the old MAX_UINT256
+            # default to a bounded value otherwise no-ops here and walks away
+            # with the old infinite allowance still active — exactly the false
+            # sense of bounded exposure this PR is meant to remove. WETH and
+            # cbBTC (the only collaterals the schema accepts) don't need the
+            # USDT-style approve(0)-first dance, so a single direct approve is
+            # safe.
+            approve_tx: Optional[str] = None
+            current_allowance: Optional[int] = None
+            if args.get("unsafe_infinite_approval"):
+                approval_amount = 2**256 - 1  # type(uint256).max
+                approve_tx = self._ensure_allowance(
+                    wallet_provider,
+                    args["collateral_token"],
+                    self._matcher_address,
+                    approval_amount,
+                )
+            else:
+                # Read once: the bounded path uses this for the force-set
+                # decision (skip approve tx when current already equals
+                # requested), and the neither-set path renders it back to
+                # the caller. Reuses `agent_address` from earlier in the
+                # handler to avoid a redundant get_address() call.
+                #
+                # The read is non-essential — if a transient RPC error fails
+                # it AFTER setOperator has already landed on-chain, we must
+                # not abort the whole grant: the caller would never reach
+                # /agents/register, never get their API key, and would have
+                # to manually revoke an active on-chain delegation.
+                #   Bounded path: send approve(requested) unconditionally
+                #     — the read failure means we can't decide whether to
+                #     skip, and over-sending an approve at the same value
+                #     is at worst a tiny gas cost.
+                #   Neither-set path: response renders "unknown" via the
+                #     existing branch in the message-formatting code.
+                try:
+                    current_allowance = int(
+                        wallet_provider.read_contract(
+                            contract_address=args["collateral_token"],
+                            abi=ERC20_ABI,
+                            function_name="allowance",
+                            args=[agent_address, self._matcher_address],
+                        )
+                    )
+                except Exception:
+                    current_allowance = None
+                if requested_collateral_approval is not None:
+                    if current_allowance is None or current_allowance != requested_collateral_approval:
+                        erc20 = _w3.eth.contract(abi=ERC20_ABI)
+                        encoded_approve = erc20.encode_abi(
+                            "approve", args=[self._matcher_address, requested_collateral_approval]
+                        )
+                        approve_tx = wallet_provider.send_transaction(
+                            transaction={"to": args["collateral_token"], "data": encoded_approve}
+                        )
+            # Truthy on both sides for consistency with line 359
+            # (`if args.get("unsafe_infinite_approval"):`). An earlier
+            # version mixed truthy here and `is True` below, which would
+            # diverge if a non-bool truthy value (e.g. 1) ever bypassed
+            # schema validation.
+            approval_requested = bool(
+                args.get("unsafe_infinite_approval") or args.get("collateral_approval") is not None
             )
 
             # Step 4: Register
@@ -401,6 +533,20 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             credit_limit = format_token_amount(int(result.get("creditLimit", "0")), usdc_decimals, "USDC")
 
+            if approval_requested:
+                approval_line = (
+                    f"**Approval tx**: {approve_tx}" if approve_tx else "**Approval**: Already at requested amount"
+                )
+            else:
+                allowance_str = str(current_allowance) if current_allowance is not None else "unknown"
+                approval_line = (
+                    f"**Approval**: No approval tx was sent. Current matcher allowance "
+                    f"on this token (raw): {allowance_str}. Re-run with "
+                    "`collateral_approval=<raw>` or `unsafe_infinite_approval=True` "
+                    "to set a new bound, or grant an allowance through your wallet "
+                    "provider directly."
+                )
+
             lines = [
                 "## Credit Delegation Granted\n",
                 f"**Facilitator**: {format_address(args['facilitator_address'])}",
@@ -410,7 +556,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 f"**Expires**: {format_duration(int(args['expiry_days']) * 86400)}",
                 "",
                 f"**setOperator tx**: {set_op_tx}",
-                f"**Approval tx**: {approve_tx}" if approve_tx else "**Approval**: Already sufficient",
+                approval_line,
                 "",
                 f"> **API Key**: `{result.get('apiKey', '')}`",
                 "> Save this key — it won't be shown again.",
