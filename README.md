@@ -61,28 +61,39 @@ pip install "floe-agentkit-actions[langchain]"
 ### 30-second example
 
 ```python
+import os
+from coinbase_agentkit.wallet_providers import EvmWalletProvider
 from floe_agentkit_actions import floe_action_provider
+
+# 1. Wallet provider (use any CDP/Privy/Viem provider; private key shown for brevity)
+wallet_provider = EvmWalletProvider.from_private_key(
+    private_key=os.environ["PRIVATE_KEY"],
+    rpc_url=os.environ["BASE_RPC_URL"],
+    network_id="base-mainnet",
+)
 
 provider = floe_action_provider()
 
-# Borrow against on-chain collateral
-loan = provider.instant_borrow(wallet_provider, {
+# 2. Borrow against on-chain collateral. Actions return formatted strings
+#    intended for an LLM — print them or pass them to your agent.
+print(provider.instant_borrow(wallet_provider, {
     "borrow_amount": "9500000000",
     "collateral_amount": "10000000000",
     "max_interest_rate_bps": "800",
     "duration": "1209600",
-})
+}))
 
-# Pay any x402 API through the Floe facilitator
-response = provider.x402_fetch(wallet_provider, {
+# 3. Pay any x402 API through the Floe facilitator
+print(provider.x402_fetch(wallet_provider, {
     "url": "https://api.example.com/premium",
     "method": "POST",
     "body": {"prompt": "..."},
-})
+}))
 
-# Check health, then repay
-provider.check_credit_status(wallet_provider, {"loan_id": loan["loan_id"]})
-provider.repay_loan(wallet_provider, {"loan_id": loan["loan_id"]})
+# 4. To act on a specific loan, fetch the id from get_my_loans / get_loan and
+#    pass it through (here "42" is a placeholder):
+print(provider.check_credit_status(wallet_provider, {"loan_id": "42"}))
+print(provider.repay_loan(wallet_provider, {"loan_id": "42"}))
 ```
 
 ---
@@ -145,6 +156,8 @@ print(result)
 
 All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% buffer before submitting. Repay and liquidate actions include configurable slippage protection (default 5%).
 
+> **Return shape:** action methods return formatted strings designed for AgentKit / LLM consumption — not parsed dicts. To extract a `loan_id`, call `get_my_loans` (or use the loan id surfaced by the LLM through `AgentKit.run(...)`).
+
 ### Flash Loan Actions (5)
 
 | Action | Description |
@@ -186,7 +199,7 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 
 ### Agent Awareness Actions (9)
 
-Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require `facilitator_api_key` to be configured on the provider.
+Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require a facilitator API key to be configured on the provider via `X402Config(facilitator_api_key=...)`.
 
 | Action | Description |
 |--------|-------------|
@@ -200,7 +213,7 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 | `delete_credit_threshold` | Remove a registered threshold |
 | `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
 
-> **Decision-loop pattern:** call `estimate_x402_cost` → check `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
+> **Decision-loop pattern:** call `estimate_x402_cost` → inspect the returned string for `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
 
 ---
 
@@ -270,17 +283,37 @@ CrewAI agents consume the Floe stack via MCP today. A runnable crew is available
 
 ---
 
+## Configuring the x402 facilitator key
+
+The x402 and agent-awareness actions require a facilitator API key. The SDK does **not** read any env var directly — pass the key through `X402Config` (or the equivalent option on `floe_action_provider`):
+
+```python
+from floe_agentkit_actions import floe_action_provider
+from floe_agentkit_actions.x402 import X402Config
+import os
+
+provider = floe_action_provider(
+    x402_config=X402Config(facilitator_api_key=os.environ["FLOE_FACILITATOR_API_KEY"]),
+)
+```
+
+A common convention is to store the value in a `FLOE_FACILITATOR_API_KEY` env var in your app and forward it to the SDK as shown.
+
+---
+
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `PRIVATE_KEY` | Wallet private key (0x...) |
-| `CDP_API_KEY_NAME` | Coinbase CDP API key name |
-| `CDP_API_KEY_PRIVATE_KEY` | Coinbase CDP API secret |
-| `OPENAI_API_KEY` | OpenAI (for CLI) |
-| `ANTHROPIC_API_KEY` | Anthropic (for CLI) |
-| `BASE_RPC_URL` | Custom Base RPC (recommended) |
-| `FLOE_FACILITATOR_API_KEY` | Required for x402 + agent-awareness actions |
+These are read by the CLI and the examples in this repo. The SDK itself does **not** read env vars — see *Configuring the x402 facilitator key* above for facilitator auth.
+
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `PRIVATE_KEY` | CLI / examples | Wallet private key (0x...) |
+| `CDP_API_KEY_NAME` | CLI | Coinbase CDP API key name |
+| `CDP_API_KEY_PRIVATE_KEY` | CLI | Coinbase CDP API secret |
+| `OPENAI_API_KEY` | CLI | OpenAI key for the conversational agent |
+| `ANTHROPIC_API_KEY` | CLI | Anthropic key for the conversational agent |
+| `BASE_RPC_URL` | CLI / examples | Custom Base RPC (recommended) |
+| `FLOE_FACILITATOR_API_KEY` | Your app | Convention only — forward to `X402Config(facilitator_api_key=...)` |
 
 ---
 
