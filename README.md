@@ -5,27 +5,44 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-Working capital for AI agents on Base. Deposit USDC, borrow up to 95% — fixed rates, gas-free, no crypto complexity.
+**The Financial OS for AI Agents — Python SDK.**
 
-**3,000+ secured working capital lines issued. Zero defaults.**
+Wallet, fiat on/off-ramp, working capital, x402 payments, and portable credit. One SDK. Works with Coinbase AgentKit, LangChain, Claude/Cursor (via MCP), and any framework that speaks HTTP.
 
-Coinbase AgentKit ActionProvider for [Floe](https://dev-dashboard.floelabs.xyz). **45 actions** for USDC/USDC credit lines, volatile-collateral lending (WETH, cbBTC), flash loans, x402 credit delegation, and agent-awareness primitives (credit, spend-limit, thresholds, x402 cost preflight).
+`floe-agentkit-actions` is the official Python SDK — an AgentKit `ActionProvider` exposing 45 actions across the full Floe stack, at full parity with the TypeScript [`floe-agent`](https://github.com/Floe-Labs/agentkit-actions) package.
 
-### 5-Second Example
+> Package name note: the Python distribution is `floe-agentkit-actions` (TS distribution is `floe-agent`). The action surface is identical.
 
-```python
-from floe_agentkit_actions import floe_action_provider
+> **Proof points:** 3,000+ secured working capital lines issued · zero defaults · 13,000+ x402 APIs reachable via the Floe proxy.
 
-provider = floe_action_provider()
+---
 
-# Deposit 10,000 USDC, borrow 9,500 USDC — same-token market, no price risk
-result = provider.instant_borrow(wallet_provider, {
-    "borrow_amount": "9500000000",
-    "collateral_amount": "10000000000",
-    "max_interest_rate_bps": "800",
-    "duration": "1209600",
-})
-```
+## The Floe Stack (what this SDK covers)
+
+| # | Component | Status | Backed by |
+|---|---|---|---|
+| 01 | **Agent Wallet** | `GA` | Any `WalletProvider` (CDP, Privy, Viem) + ERC-8004 identity |
+| 02 | **Fiat on-ramp** | `GA` (dashboard-driven) | Coinbase onramp via the [Floe dashboard](https://dev-dashboard.floelabs.xyz). Fiat off-ramp `Preview`. |
+| 03 | **Secured working capital** | `GA` | `instant_borrow`, `repay_and_reborrow`, `check_credit_status`, `request_credit`, `manual_match_credit` + 15 lending primitives |
+| 04 | **Unsecured working capital** | `Preview` | Receivables + chain-of-thought underwriting — email [hello@floelabs.xyz](mailto:hello@floelabs.xyz) for the design partner program |
+| 05 | **x402 payment facilitator** | `GA` | `grant_credit_delegation`, `revoke_credit_delegation`, `check_credit_delegation`, `x402_fetch`, `x402_get_balance`, `x402_get_transactions` |
+| 06 | **Credit & trust bureau** | Reader `Beta` · Writer `Preview` | `list_credit_thresholds`, `register_credit_threshold`, `delete_credit_threshold` today. Portable ERC-8004 read API in Beta. |
+
+---
+
+## Framework support
+
+| Framework | Status | How |
+|---|---|---|
+| Coinbase AgentKit | `GA` | Native — `floe_action_provider()` |
+| LangChain | `GA` | `from floe_agentkit_actions.integrations.langchain import get_floe_langchain_tools` |
+| OpenAI Agents SDK | `Beta` | `from floe_agentkit_actions.integrations.openai_agents import get_floe_openai_tools` |
+| Claude Desktop / Claude Code / Cursor | `GA` | Via [floe-mcp-server](https://github.com/Floe-Labs/floe-mcp-server) |
+| CrewAI | `Beta` | Via MCP server (see [floe-examples](https://github.com/Floe-Labs/floe-examples)) |
+| ElizaOS | `Preview` | MCP fallback today |
+| Plain HTTP / REST | `GA` | Any framework — call the [REST API](https://floe-labs.gitbook.io/docs/developers/credit-api) |
+
+---
 
 ## Installation
 
@@ -39,7 +56,47 @@ pip install "floe-agentkit-actions[cli]"
 pip install "floe-agentkit-actions[langchain]"
 ```
 
-> **Fund with fiat:** Agents (or their operators) can fund wallets with USDC via Coinbase — credit card or bank transfer — directly from the [Floe dashboard](https://dev-dashboard.floelabs.xyz). No crypto on-ramp needed.
+> **Fund with fiat:** Agents (or their operators) can fund wallets with USDC via Coinbase — credit card, bank transfer, Apple Pay, Google Pay — directly from the [Floe dashboard](https://dev-dashboard.floelabs.xyz). No crypto on-ramp needed.
+
+### 30-second example
+
+```python
+import os
+from coinbase_agentkit.wallet_providers import EvmWalletProvider
+from floe_agentkit_actions import floe_action_provider
+
+# 1. Wallet provider (use any CDP/Privy/Viem provider; private key shown for brevity)
+wallet_provider = EvmWalletProvider.from_private_key(
+    private_key=os.environ["PRIVATE_KEY"],
+    rpc_url=os.environ["BASE_RPC_URL"],
+    network_id="base-mainnet",
+)
+
+provider = floe_action_provider()
+
+# 2. Borrow against on-chain collateral. Actions return formatted strings
+#    intended for an LLM — print them or pass them to your agent.
+print(provider.instant_borrow(wallet_provider, {
+    "borrow_amount": "9500000000",
+    "collateral_amount": "10000000000",
+    "max_interest_rate_bps": "800",
+    "duration": "1209600",
+}))
+
+# 3. Pay any x402 API through the Floe facilitator
+print(provider.x402_fetch(wallet_provider, {
+    "url": "https://api.example.com/premium",
+    "method": "POST",
+    "body": {"prompt": "..."},
+}))
+
+# 4. To act on a specific loan, fetch the id from get_my_loans / get_loan and
+#    pass it through (here "42" is a placeholder):
+print(provider.check_credit_status(wallet_provider, {"loan_id": "42"}))
+print(provider.repay_loan(wallet_provider, {"loan_id": "42"}))
+```
+
+---
 
 ## Quick Start
 
@@ -68,6 +125,8 @@ result = floe.get_price(wallet_provider, {
 print(result)
 ```
 
+---
+
 ## Actions (45 total)
 
 ### Read Actions (8)
@@ -77,7 +136,7 @@ print(result)
 | `get_markets` | Get info about Floe lending markets (rates, LTV bounds, pause status) |
 | `get_loan` | Get detailed loan information (participants, health, time remaining) |
 | `get_my_loans` | Get all loans for the connected wallet (as lender or borrower) |
-| `check_loan_health` | Check loan health -- current LTV vs liquidation threshold, buffer % |
+| `check_loan_health` | Check loan health — current LTV vs liquidation threshold, buffer % |
 | `get_price` | Get oracle price for a collateral/loan token pair (Chainlink + Pyth) |
 | `get_accrued_interest` | Get interest accrued on a loan (amount, time elapsed, rate) |
 | `get_liquidation_quote` | Get profit/loss breakdown for liquidating an unhealthy loan |
@@ -90,12 +149,14 @@ print(result)
 | `post_lend_intent` | Post a fixed-rate lending offer (auto-approves loan token) |
 | `post_borrow_intent` | Post a borrow request with collateral (auto-approves collateral) |
 | `match_intents` | Match a lend + borrow intent to create a loan |
-| `repay_loan` | Repay a loan fully or partially (with slippage protection) |
+| `repay_loan` | Repay a loan fully or partially (with slippage protection). Collateral auto-returns in the same tx. |
 | `add_collateral` | Add collateral to improve loan health |
 | `withdraw_collateral` | Withdraw excess collateral (enforces safety buffer) |
 | `liquidate_loan` | Liquidate an unhealthy loan (currentLTV >= threshold or overdue) |
 
 All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% buffer before submitting. Repay and liquidate actions include configurable slippage protection (default 5%).
+
+> **Return shape:** action methods return formatted strings designed for AgentKit / LLM consumption — not parsed dicts. To extract a `loan_id`, call `get_my_loans` (or use the loan id surfaced by the LLM through `AgentKit.run(...)`).
 
 ### Flash Loan Actions (5)
 
@@ -111,10 +172,10 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 
 | Action | Description |
 |--------|-------------|
-| `instant_borrow` | Borrow USDC instantly -- auto-selects best lender, handles approval + register + match in one call |
+| `instant_borrow` | Borrow USDC instantly — auto-selects best lender, handles approval + register + match in one call |
 | `repay_and_reborrow` | Repay an existing loan and instantly borrow again. If reborrow fails, repayment still succeeds |
 | `check_credit_status` | Loan health, balance, accrued interest, time to expiry, early repayment terms |
-| `request_credit` | Browse available credit offers -- rates, amounts, durations |
+| `request_credit` | Browse available credit offers — rates, amounts, durations |
 | `manual_match_credit` | Match with a specific lend intent (register + match) |
 
 ### Deploy / Verify / Readiness Actions (3)
@@ -138,7 +199,7 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 
 ### Agent Awareness Actions (9)
 
-Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require `facilitator_api_key` to be configured on the provider.
+Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require a facilitator API key to be configured on the provider via `X402Config(facilitator_api_key=...)`.
 
 | Action | Description |
 |--------|-------------|
@@ -150,9 +211,11 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 | `list_credit_thresholds` | List registered credit-utilization webhook triggers |
 | `register_credit_threshold` | Register a webhook trigger at a utilization threshold (cap: 20 per agent) |
 | `delete_credit_threshold` | Remove a registered threshold |
-| `estimate_x402_cost` | Preflight an x402 URL -- returns cost + reflection against your credit (no payment) |
+| `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
 
-> **Decision-loop pattern:** call `estimate_x402_cost` -> check `willExceedAvailable` / `willExceedSpendLimit` -> conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
+> **Decision-loop pattern:** call `estimate_x402_cost` → inspect the returned string for `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
+
+---
 
 ## CLI
 
@@ -160,13 +223,15 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 floe-agent
 ```
 
-Interactive AI-powered DeFi agent with support for OpenAI, Claude, and Ollama.
+Interactive AI-powered agent with support for OpenAI, Claude, and Ollama.
 
 The CLI prompts for:
 
-1. **Wallet provider** -- Private Key (direct) or CDP Wallet (MPC managed)
-2. **AI provider** -- OpenAI (GPT-4o), Anthropic (Claude), or Ollama (local)
-3. **RPC URL** -- Custom Base Mainnet RPC (recommended for reliability)
+1. **Wallet provider** — Private Key (direct) or CDP Wallet (MPC managed)
+2. **AI provider** — OpenAI (GPT-4o), Anthropic (Claude), or Ollama (local)
+3. **RPC URL** — Custom Base Mainnet RPC (recommended for reliability)
+
+---
 
 ## Wallet Providers
 
@@ -175,9 +240,11 @@ The CLI prompts for:
 | Private Key (`EvmWalletProvider`) | Development / scripting |
 | CDP (`CdpWalletProvider`) | Production agents (MPC) |
 
+---
+
 ## Framework Integrations
 
-### LangChain
+### LangChain (`GA`)
 
 ```python
 from floe_agentkit_actions.integrations.langchain import get_floe_langchain_tools
@@ -185,7 +252,7 @@ from floe_agentkit_actions.integrations.langchain import get_floe_langchain_tool
 tools = get_floe_langchain_tools(wallet_provider)
 ```
 
-### OpenAI Function Calling
+### OpenAI Agents / function calling (`Beta`)
 
 ```python
 from floe_agentkit_actions.integrations.openai_agents import get_floe_openai_tools
@@ -193,16 +260,62 @@ from floe_agentkit_actions.integrations.openai_agents import get_floe_openai_too
 tools = get_floe_openai_tools(wallet_provider)
 ```
 
+### MCP (Claude Desktop / Claude Code / Cursor) — `GA`
+
+Zero install via the hosted endpoint:
+
+```json
+{
+  "mcpServers": {
+    "floe": {
+      "url": "https://mcp.floelabs.xyz/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+Or run a local MCP server — see [floe-mcp-server](https://github.com/Floe-Labs/floe-mcp-server).
+
+### CrewAI (`Beta`)
+
+CrewAI agents consume the Floe stack via MCP today. A runnable crew is available in [floe-examples/crewai-demo](https://github.com/Floe-Labs/floe-examples).
+
+---
+
+## Configuring the x402 facilitator key
+
+The x402 and agent-awareness actions require a facilitator API key. The SDK does **not** read any env var directly — pass the key through `X402Config` (or the equivalent option on `floe_action_provider`):
+
+```python
+from floe_agentkit_actions import floe_action_provider
+from floe_agentkit_actions.x402 import X402Config
+import os
+
+provider = floe_action_provider(
+    x402_config=X402Config(facilitator_api_key=os.environ["FLOE_FACILITATOR_API_KEY"]),
+)
+```
+
+A common convention is to store the value in a `FLOE_FACILITATOR_API_KEY` env var in your app and forward it to the SDK as shown.
+
+---
+
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `PRIVATE_KEY` | Wallet private key (0x...) |
-| `CDP_API_KEY_NAME` | Coinbase CDP API key name |
-| `CDP_API_KEY_PRIVATE_KEY` | Coinbase CDP API secret |
-| `OPENAI_API_KEY` | OpenAI (for CLI) |
-| `ANTHROPIC_API_KEY` | Anthropic (for CLI) |
-| `BASE_RPC_URL` | Custom Base RPC (recommended) |
+These are read by the CLI and the examples in this repo. The SDK itself does **not** read env vars — see *Configuring the x402 facilitator key* above for facilitator auth.
+
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `PRIVATE_KEY` | CLI / examples | Wallet private key (0x...) |
+| `CDP_API_KEY_NAME` | CLI | Coinbase CDP API key name |
+| `CDP_API_KEY_PRIVATE_KEY` | CLI | Coinbase CDP API secret |
+| `OPENAI_API_KEY` | CLI | OpenAI key for the conversational agent |
+| `ANTHROPIC_API_KEY` | CLI | Anthropic key for the conversational agent |
+| `BASE_RPC_URL` | CLI / examples | Custom Base RPC (recommended) |
+| `FLOE_FACILITATOR_API_KEY` | Your app | Convention only — forward to `X402Config(facilitator_api_key=...)` |
+
+---
 
 ## Contract Addresses (Base Mainnet)
 
@@ -211,9 +324,12 @@ tools = get_floe_openai_tools(wallet_provider)
 | LendingIntentMatcher | `0x17946cD3e180f82e632805e5549EC913330Bb175` |
 | LendingViews | `0x9101027166bE205105a9E0c68d6F14f21f6c5003` |
 | PriceOracle | `0xEA058a06b54dce078567f9aa4dBBE82a100210Cc` |
+| x402 Facilitator | `0x58EDdE022FFDAD3Fb0Fb0E7D51eb05AaF66a31f1` |
 | Aerodrome SwapRouter | `0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5` |
 | Aerodrome QuoterV2 | `0x254cF9E1E6e233aa1AC962CB9B05b2cFeAAe15b0` |
 | WETH | `0x4200000000000000000000000000000000000006` |
+
+---
 
 ## Development
 
@@ -222,12 +338,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
+---
+
 ## Links
 
-- [Website](https://dev-dashboard.floelabs.xyz)
+- [Website](https://floelabs.xyz)
 - [Documentation](https://floe-labs.gitbook.io/docs)
-- [TypeScript counterpart (floe-agent)](https://github.com/floelabs/agentkit-actions)
-- [MCP Server (@floelabs/mcp-server)](https://github.com/floelabs/floe-mcp-server)
+- [TypeScript counterpart (`floe-agent`)](https://github.com/Floe-Labs/agentkit-actions)
+- [MCP server (`@floelabs/mcp-server`)](https://github.com/Floe-Labs/floe-mcp-server)
+- [End-to-end examples](https://github.com/Floe-Labs/floe-examples)
 
 ## License
 
