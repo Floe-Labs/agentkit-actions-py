@@ -13,10 +13,10 @@ from rich.console import Console
 from ..constants import BASE_MAINNET_MATCHER, LENDING_MATCHER_ABI
 from .ai_factory import AIClient, _default_model, create_ai_client
 from .commands.agents_list import run_list_command
+from .commands.open_credit_line import OpenCreditLineArgs, run_open_credit_line_command
 from .commands.register import RegisterArgs, run_register_command
 from .commands.revoke import run_revoke_command
 from .commands.rotate import run_rotate_command
-from .commands.open_credit_line import OpenCreditLineArgs, run_open_credit_line_command
 from .commands.use import run_use_command
 from .config import (
     AgentRecord,
