@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sys
 from typing import Any
@@ -11,13 +12,27 @@ from rich.console import Console
 
 from ..constants import BASE_MAINNET_MATCHER, LENDING_MATCHER_ABI
 from .ai_factory import AIClient, _default_model, create_ai_client
-from .config import FloeAgentConfig, load_config, save_config
+from .commands.agents_list import run_list_command
+from .commands.register import RegisterArgs, run_register_command
+from .commands.revoke import run_revoke_command
+from .commands.rotate import run_rotate_command
+from .commands.open_credit_line import OpenCreditLineArgs, run_open_credit_line_command
+from .commands.use import run_use_command
+from .config import (
+    AgentRecord,
+    FloeAgentConfig,
+    get_agent,
+    list_agents,
+    load_config,
+    save_config,
+)
 from .display import print_banner, print_help, print_session_info
+from .keychain import get_agent_key
 from .prompts import prompt_reuse_saved_config, run_setup_flow
 from .wallet_factory import create_wallet
 
 console = Console()
-VERSION = "0.1.0"
+VERSION = "0.4.0"
 
 # Known market pairs on Base Mainnet
 MARKET_PAIRS: list[dict[str, str]] = [
@@ -45,33 +60,170 @@ MARKET_PAIRS: list[dict[str, str]] = [
 ]
 
 
+def _print_root_help() -> None:
+    print("Usage: floe-agent [command] [options]\n")
+    print("Floe DeFi agent for the Base Mainnet lending protocol.\n")
+    print("Commands:")
+    print("  run                 Interactive REPL (default)")
+    print("  register            Register a new agent and mint an API key")
+    print("  agents              List registered agents")
+    print("  use <name>          Set the active agent")
+    print("  rotate <name>       Atomically rotate the agent's API key")
+    print("  revoke <name>       Revoke the agent's API key")
+    print("  open-credit-line    Open the USDC/USDC credit line for a funded agent")
+    print("")
+    print("Common options:")
+    print("  --help, -h          Show help")
+    print("  --version, -v       Show version")
+    print("  --agent <name>      Select agent for `run` (overrides active_agent)")
+    print("  --facilitator-url   Facilitator base URL (for register/revoke)")
+    print("")
+    print("Environment variables:")
+    print("  PRIVATE_KEY                     Wallet private key")
+    print("  CDP_API_KEY_NAME / *_PRIVATE_KEY  Coinbase CDP credentials")
+    print("  OPENAI_API_KEY / ANTHROPIC_API_KEY  AI provider keys")
+    print("  BASE_RPC_URL                    Custom Base RPC")
+    print("  FLOE_FACILITATOR_URL            Default facilitator URL")
+    print("  FLOE_AGENT_KEY_<NAME>           Per-agent API key (keychain fallback)")
+
+
+def _parse_flag(args: list[str], name: str) -> str | None:
+    prefix = f"--{name}="
+    for arg in args:
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    if f"--{name}" in args:
+        idx = args.index(f"--{name}")
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    return None
+
+
 def run() -> None:
     """Entry point for the CLI."""
     args = sys.argv[1:]
 
     if "--help" in args or "-h" in args:
-        print("Usage: floe-agent [options]\n")
-        print("Interactive DeFi agent for the Floe lending protocol on Base Mainnet.\n")
-        print("Options:")
-        print("  --help, -h       Show this help message")
-        print("  --version, -v    Show version")
-        print("\nEnvironment variables:")
-        print("  PRIVATE_KEY              Wallet private key (0x...)")
-        print("  CDP_API_KEY_NAME         Coinbase CDP API key name")
-        print("  CDP_API_KEY_PRIVATE_KEY  Coinbase CDP API private key")
-        print("  OPENAI_API_KEY           OpenAI API key")
-        print("  ANTHROPIC_API_KEY        Anthropic API key")
-        print("  BASE_RPC_URL             Custom Base Mainnet RPC (recommended)")
+        _print_root_help()
         sys.exit(0)
 
     if "--version" in args or "-v" in args:
         print(VERSION)
         sys.exit(0)
 
+    # Subcommand dispatch: a recognized first arg routes to a dedicated
+    # handler; everything else falls through to the interactive REPL.
+    sub = args[0] if args else None
+    rest = args[1:]
+
+    if sub == "register":
+        name = _parse_flag(rest, "name")
+        if not name:
+            console.print("[red]`register` requires --name <name>.[/red]")
+            sys.exit(1)
+        facilitator_url = (
+            _parse_flag(rest, "facilitator-url")
+            or os.environ.get("FLOE_FACILITATOR_URL")
+            or "https://x402.floe.xyz"
+        )
+        raw_rate = _parse_flag(rest, "max-rate-bps")
+        raw_expiry = _parse_flag(rest, "expiry-days")
+        run_register_command(
+            RegisterArgs(
+                name=name,
+                facilitator_url=facilitator_url,
+                borrow_limit_usdc=_parse_flag(rest, "borrow-limit"),
+                max_rate_bps=int(raw_rate) if raw_rate else None,
+                expiry_days=int(raw_expiry) if raw_expiry else None,
+                label=_parse_flag(rest, "label"),
+            )
+        )
+        return
+    if sub in ("agents", "list"):
+        run_list_command()
+        return
+    if sub == "use":
+        if not rest:
+            console.print("[red]`use` requires an agent name.[/red]")
+            sys.exit(1)
+        run_use_command(rest[0])
+        return
+    if sub == "rotate":
+        if not rest:
+            console.print("[red]`rotate` requires an agent name.[/red]")
+            sys.exit(1)
+        run_rotate_command(rest[0])
+        return
+    if sub == "revoke":
+        if not rest:
+            console.print("[red]`revoke` requires an agent name.[/red]")
+            sys.exit(1)
+        config = load_config()
+        agent = get_agent(config, rest[0]) if config else None
+        facilitator_url = (
+            (agent or {}).get("facilitator_url")
+            or _parse_flag(rest, "facilitator-url")
+            or os.environ.get("FLOE_FACILITATOR_URL")
+            or "https://x402.floe.xyz"
+        )
+        run_revoke_command(rest[0], facilitator_url)
+        return
+    if sub == "open-credit-line":
+        name = _parse_flag(rest, "name") or (rest[0] if rest else None)
+        if not name:
+            console.print("[red]`open-credit-line` requires --name <name>.[/red]")
+            sys.exit(1)
+        raw_ltv = _parse_flag(rest, "max-ltv-bps")
+        raw_rate = _parse_flag(rest, "max-rate-bps")
+        run_open_credit_line_command(
+            OpenCreditLineArgs(
+                name=name,
+                deposit_usdc=_parse_flag(rest, "deposit"),
+                max_ltv_bps=int(raw_ltv) if raw_ltv else None,
+                max_rate_bps=int(raw_rate) if raw_rate else None,
+            )
+        )
+        return
+
+    # Default: interactive REPL. `run` is an explicit alias.
+    repl_args = rest if sub == "run" else args
+    explicit_agent = _parse_flag(repl_args, "agent")
+    _run_interactive(explicit_agent)
+
+
+def _resolve_agent_context(
+    config: FloeAgentConfig | None,
+    explicit: str | None,
+) -> AgentRecord | None:
+    if not config or not config.get("agents"):
+        return None
+    if explicit:
+        return get_agent(config, explicit)
+    active = config.get("active_agent")
+    if active:
+        return get_agent(config, active)
+    all_agents = list_agents(config)
+    if len(all_agents) == 1:
+        return all_agents[0]
+    return None
+
+
+def _run_interactive(explicit_agent: str | None = None) -> None:
     print_banner()
 
-    # Check for saved config
     saved_config = load_config()
+
+    if (
+        saved_config
+        and "agents" not in saved_config
+        and os.environ.get("FLOE_AGENT_KEY")
+    ):
+        console.print(
+            "[yellow]  Notice: FLOE_AGENT_KEY env var detected on a pre-multi-agent config.\n"
+            "  Run `floe-agent register --name <name>` to migrate to the new flow,\n"
+            "  or set FLOE_AGENT_KEY_<UPPER_NAME> for the active agent.[/yellow]"
+        )
+
     if saved_config and prompt_reuse_saved_config(saved_config):
         setup_result = run_setup_flow(saved_config)
     else:
@@ -103,15 +255,53 @@ def run() -> None:
     known_market_ids = _discover_market_ids(wallet_provider)
     console.print(f"[green]Found {len(known_market_ids)} markets[/green]")
 
+    # Resolve the active agent for this session. Precedence:
+    #   --agent <name>  >  config.active_agent  >  single registered agent
+    # If none → x402 actions still work for the LLM but every facilitator
+    # call will 401 until a key is provided.
+    agent_context = _resolve_agent_context(saved_config, explicit_agent)
+
+    facilitator_api_key: str | None = None
+    if agent_context:
+        facilitator_api_key = get_agent_key(
+            agent_context["name"], agent_context["facilitator_url"]
+        )
+        if facilitator_api_key:
+            console.print(
+                f"[green]Loaded API key for \"{agent_context['name']}\" "
+                f"({agent_context.get('key_prefix', '')}…)[/green]"
+            )
+        else:
+            console.print(
+                f"[yellow]No API key found for \"{agent_context['name']}\". "
+                f"Run `floe-agent rotate {agent_context['name']}` or set the env-var fallback.[/yellow]"
+            )
+    else:
+        console.print(
+            "[dim]  No active agent. Register one with "
+            "`floe-agent register --name <name>` to enable agent-aware actions.[/dim]"
+        )
+
     # Initialize Floe actions
     console.print("[dim]Initializing Floe actions...[/dim]")
-    from .. import floe_action_provider
+    from .. import floe_action_provider, x402_action_provider
     from ..types import FloeConfig
+    from ..x402_action_provider import X402Config
 
-    provider = floe_action_provider(FloeConfig(known_market_ids=known_market_ids))
+    floe_provider = floe_action_provider(FloeConfig(known_market_ids=known_market_ids))
+    x402_provider = x402_action_provider(
+        X402Config(
+            facilitator_url=(agent_context or {}).get("facilitator_url", ""),
+            facilitator_api_key=facilitator_api_key or "",
+            agent_name=(agent_context or {}).get("name", ""),
+        )
+    )
 
-    # Build tool definitions for AI
-    tools, action_map = _build_tools(provider, wallet_provider)
+    # Build tool definitions for AI — merge tools from both providers.
+    tools, action_map = _build_tools(floe_provider, wallet_provider)
+    x402_tools, x402_action_map = _build_tools(x402_provider, wallet_provider)
+    tools.extend(x402_tools)
+    action_map.update(x402_action_map)
     console.print(f"[green]{len(tools)} Floe actions loaded[/green]")
 
     # Display session info
@@ -129,13 +319,18 @@ def run() -> None:
     system_prompt = _build_system_prompt(address, [t["function"]["name"] for t in tools])
 
     # Current config for save command
-    current_config = FloeAgentConfig(
-        wallet_type=wallet_config["type"],
-        ai_provider=ai_config["provider"],
-        ai_model=ai_config.get("model"),
-        ollama_base_url=ai_config.get("ollama_base_url"),
-        rpc_url=setup_result.get("rpc_url"),
-    )
+    current_config: FloeAgentConfig = {
+        "wallet_type": wallet_config["type"],
+        "ai_provider": ai_config["provider"],
+        "ai_model": ai_config.get("model"),
+        "ollama_base_url": ai_config.get("ollama_base_url"),
+        "rpc_url": setup_result.get("rpc_url"),
+    }
+    if saved_config:
+        if saved_config.get("agents"):
+            current_config["agents"] = saved_config["agents"]
+        if saved_config.get("active_agent"):
+            current_config["active_agent"] = saved_config["active_agent"]
 
     messages: list[dict[str, Any]] = []
 
