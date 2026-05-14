@@ -188,6 +188,18 @@ def run() -> None:
     # Default: interactive REPL. `run` is an explicit alias.
     repl_args = rest if sub == "run" else args
     explicit_agent = _parse_flag(repl_args, "agent")
+    # Fail fast on an unknown --agent BEFORE we print the banner and walk
+    # the user through the setup prompts. Otherwise the user fills in
+    # wallet/AI prompts only to discover at the very end that the agent
+    # name was a typo.
+    if explicit_agent:
+        cfg = load_config()
+        if not cfg or not get_agent(cfg, explicit_agent):
+            console.print(
+                f"[red]Unknown agent \"{explicit_agent}\". "
+                f"Run `floe-agent agents` to list registered agents.[/red]"
+            )
+            sys.exit(1)
     _run_interactive(explicit_agent)
 
 

@@ -46,6 +46,29 @@ def _usdc_to_raw(amount: str) -> str:
     return str(int(scaled))
 
 
+def _require_prompt(value: str | None, label: str) -> str:
+    """Return ``value`` or exit cleanly if the user cancelled the prompt (Ctrl-C / EOF)."""
+    if value is None or value == "":
+        console.print(f"[red]{label} is required.[/red]")
+        sys.exit(1)
+    return value
+
+
+def _prompt_int(message: str, default: str) -> int:
+    """Prompt for an integer; exit cleanly if cancelled or not parseable."""
+    import questionary
+
+    raw = questionary.text(message, default=default).ask()
+    if raw is None:
+        console.print("[red]Input required.[/red]")
+        sys.exit(1)
+    try:
+        return int(raw)
+    except ValueError:
+        console.print(f"[red]Expected an integer, got {raw!r}.[/red]")
+        sys.exit(1)
+
+
 def _resolve_wallet_config(existing: FloeAgentConfig | None) -> dict[str, Any]:
     """Build a wallet config dict that ``create_wallet`` accepts."""
     import os
@@ -54,16 +77,19 @@ def _resolve_wallet_config(existing: FloeAgentConfig | None) -> dict[str, Any]:
 
     wallet_type = (existing or {}).get("wallet_type") or "private-key"
     if wallet_type == "private-key":
-        pk = os.environ.get("PRIVATE_KEY") or questionary.password("Private key (0x...):").ask()
+        pk = os.environ.get("PRIVATE_KEY") or _require_prompt(
+            questionary.password("Private key (0x...):").ask(), "Private key"
+        )
         cfg: dict[str, Any] = {"type": "private-key", "private_key": pk}
         rpc = (existing or {}).get("rpc_url")
         if rpc:
             cfg["rpc_url"] = rpc
         return cfg
-    name = os.environ.get("CDP_API_KEY_NAME") or questionary.text("CDP API Key Name:").ask()
-    key = (
-        os.environ.get("CDP_API_KEY_PRIVATE_KEY")
-        or questionary.password("CDP API Key Private Key:").ask()
+    name = os.environ.get("CDP_API_KEY_NAME") or _require_prompt(
+        questionary.text("CDP API Key Name:").ask(), "CDP API Key Name"
+    )
+    key = os.environ.get("CDP_API_KEY_PRIVATE_KEY") or _require_prompt(
+        questionary.password("CDP API Key Private Key:").ask(), "CDP API Key Private Key"
     )
     return {"type": "cdp", "api_key_name": name, "api_key_private_key": key}
 
@@ -84,18 +110,19 @@ def run_register_command(args: RegisterArgs) -> None:
 
     import questionary
 
-    borrow_limit_usdc = args.borrow_limit_usdc or questionary.text(
-        "Borrow limit (USDC, e.g. 10000):", default="10000"
-    ).ask()
+    borrow_limit_usdc = args.borrow_limit_usdc or _require_prompt(
+        questionary.text("Borrow limit (USDC, e.g. 10000):", default="10000").ask(),
+        "Borrow limit",
+    )
     max_rate_bps = (
         args.max_rate_bps
         if args.max_rate_bps is not None
-        else int(questionary.text("Max interest rate (bps, e.g. 1500 = 15%):", default="1500").ask())
+        else _prompt_int("Max interest rate (bps, e.g. 1500 = 15%):", "1500")
     )
     expiry_days = (
         args.expiry_days
         if args.expiry_days is not None
-        else int(questionary.text("Delegation expiry (days):", default="90").ask())
+        else _prompt_int("Delegation expiry (days):", "90")
     )
 
     if not (1 <= max_rate_bps <= 10000):
@@ -201,10 +228,11 @@ def run_register_command(args: RegisterArgs) -> None:
             f"[dim]  Saved to OS keychain — load it via `floe-agent run --agent {args.name}`.[/dim]"
         )
     else:
-        from ..keychain import _env_var_name
+        from ..keychain import env_var_name_for
 
         console.print(
-            f"[yellow]  OS keychain unavailable. Export {_env_var_name(args.name)} "
+            f"[yellow]  OS keychain unavailable. Export "
+            f"{env_var_name_for(args.name, args.facilitator_url)} "
             "to use this key later.[/yellow]"
         )
     console.print("")

@@ -53,12 +53,20 @@ def run_rotate_command(name: str) -> None:
         if not keys:
             console.print("[red]No active key to rotate. Use `floe-agent register` instead.[/red]")
             sys.exit(1)
-        rotated = client.rotate_agent_key(agent["agent_id"], keys[0]["id"])
+        # Prefer the key matching the locally tracked prefix; fall back to
+        # keys[0] so the cap-of-1 case still works when local state has
+        # drifted (e.g., user rotated through the dashboard).
+        current = None
+        if agent.get("key_prefix"):
+            current = next((k for k in keys if k.get("key_prefix") == agent["key_prefix"]), None)
+        if current is None:
+            current = keys[0]
+        rotated = client.rotate_agent_key(agent["agent_id"], current["id"])
     except Exception as err:  # noqa: BLE001
         console.print(f"[red]Rotate failed: {err}[/red]")
         sys.exit(1)
     console.print(
-        f"[green]Rotated key (old: {keys[0]['key_prefix']}, new: {rotated['key_prefix']})[/green]"
+        f"[green]Rotated key (old: {current['key_prefix']}, new: {rotated['key_prefix']})[/green]"
     )
 
     agent["key_prefix"] = rotated["key_prefix"]
@@ -85,9 +93,9 @@ def run_rotate_command(name: str) -> None:
     if stored_in_keychain:
         console.print("[dim]  Stored in OS keychain (or env-var fallback).[/dim]\n")
     else:
-        import re
+        from ..keychain import env_var_name_for
 
-        env_name = "FLOE_AGENT_KEY_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
+        env_name = env_var_name_for(name, agent["facilitator_url"])
         console.print(
             f"[dim]  Export {env_name} to load this key on next `floe-agent run`.[/dim]\n"
         )

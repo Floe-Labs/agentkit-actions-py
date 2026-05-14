@@ -55,7 +55,11 @@ def run_revoke_command(name: str, facilitator_url: str) -> None:
         return
 
     wallet_provider = create_wallet(_resolve_wallet_config(config))
-    client = FloeApiClient(facilitator_url, wallet_provider)
+    # Hit the facilitator the agent was actually registered against; the
+    # caller-supplied `facilitator_url` (default or --flag) is only a
+    # fallback when local state is missing. Otherwise revoke could 401
+    # against a different backend that has never seen this key.
+    client = FloeApiClient(agent.get("facilitator_url") or facilitator_url, wallet_provider)
 
     console.print("[dim]Looking up active key...[/dim]")
     try:
@@ -64,17 +68,36 @@ def run_revoke_command(name: str, facilitator_url: str) -> None:
         console.print(f"[red]Listing keys failed: {err}[/red]")
         sys.exit(1)
 
-    if not keys:
+    # Prefer the key matching the locally tracked prefix; fall back to
+    # keys[0] so the cap-of-1 case still works if local state drifted.
+    target = None
+    if keys:
+        if agent.get("key_prefix"):
+            target = next((k for k in keys if k.get("key_prefix") == agent["key_prefix"]), None)
+        if target is None:
+            target = keys[0]
+
+    if target is None:
         console.print("[yellow]  No active keys server-side. Clearing local entry.[/yellow]")
     else:
         try:
-            client.revoke_agent_key(agent["agent_id"], keys[0]["id"])
-            console.print(f"[green]  Revoked key {keys[0]['key_prefix']}[/green]")
+            client.revoke_agent_key(agent["agent_id"], target["id"])
+            console.print(f"[green]  Revoked key {target['key_prefix']}[/green]")
         except Exception as err:  # noqa: BLE001
             console.print(f"[red]Revoke failed: {err}[/red]")
             sys.exit(1)
 
-    delete_agent_key(name, agent["facilitator_url"])
-    agent["revoked"] = True
-    save_config(config)
-    console.print(f"[green]  Local keychain entry for \"{name}\" removed.[/green]")
+    deleted = delete_agent_key(name, agent["facilitator_url"])
+    if deleted:
+        agent["revoked"] = True
+        save_config(config)
+        console.print(f"[green]  Local keychain entry for \"{name}\" removed.[/green]")
+    else:
+        # Server-side revoke already succeeded; local cleanup is the only
+        # thing left. Don't claim success — surface the partial state so
+        # the user knows to clear the env-var fallback or rerun manually.
+        console.print(
+            "[yellow]  Local keychain entry could not be deleted "
+            "(no keyring backend or already absent). "
+            "If a FLOE_AGENT_KEY_* env var is set, unset it manually.[/yellow]"
+        )

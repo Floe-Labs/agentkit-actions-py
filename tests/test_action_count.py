@@ -4,22 +4,23 @@ Validates that both providers export the expected number of actions, and
 asserts that the Python port remains at full parity with the TypeScript
 reference (`agentkit-actions`).
 
-Current state (May 2026 — agent-awareness primitives added):
+Current state (May 2026 — v0.4 managed credit-line):
 
-- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=15 = 45
-- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=15 = 45
+- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=16 = 46
+- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=16 = 46
 
-X402ActionProvider gained 9 agent-awareness actions (get_credit_remaining,
-get_loan_state, {get,set,clear}_spend_limit,
-{list,register,delete}_credit_threshold, estimate_x402_cost) that wrap the
-new /v1/agents/* and /v1/x402/estimate REST endpoints on the Floe API.
+X402ActionProvider has 6 credit-delegation actions (grant/revoke/check +
+x402_fetch + x402_get_balance + x402_get_transactions) + 9 agent-awareness
+actions (get_credit_remaining, get_loan_state, {get,set,clear}_spend_limit,
+{list,register,delete}_credit_threshold, estimate_x402_cost) + 1 managed
+credit-line action (open_credit_line) added in v0.4.
 
 Parity maintained — PARITY_GAP = 0.
 
 If either provider's action count changes, update the constants below.
 If parity breaks (Python drifts behind TypeScript), fix the port — do not
 just bump PARITY_GAP to hide the drift. The docs at floe-labs-docs claim
-"45 actions in both TypeScript and Python" — keep that true.
+"46 actions in both TypeScript and Python" — keep that true.
 """
 
 from __future__ import annotations
@@ -27,17 +28,16 @@ from __future__ import annotations
 from floe_agentkit_actions.action_provider import FloeActionProvider
 from floe_agentkit_actions.x402_action_provider import X402ActionProvider
 
-
 # If these numbers change, it means either:
 #   (a) Someone added a new action — bump the expected count and update
 #       floe-labs-docs if the combined total changed
 #   (b) Someone removed an action — investigate whether that was intentional
 FLOE_PROVIDER_ACTION_COUNT = 30  # full TS parity: 23 base + 7 credit-facility
-X402_PROVIDER_ACTION_COUNT = 15  # 6 x402 delegation + 9 agent-awareness
-TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 45
+X402_PROVIDER_ACTION_COUNT = 16  # 6 x402 delegation + 9 agent-awareness + 1 open_credit_line (v0.4)
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 46
 
 # The TypeScript reference port. Gap = TS - Python. Closed.
-TS_REFERENCE_TOTAL = 45
+TS_REFERENCE_TOTAL = 46
 PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0
 
 

@@ -139,7 +139,12 @@ class OpenCreditLineSchema(BaseModel):
     @field_validator("deposit_usdc")
     @classmethod
     def validate_deposit(cls, v: str) -> str:
-        if not re.match(r"^(0|[1-9]\d*)(\.\d+)?$", v):
+        # Reject zero up front. The previous pattern `^(0|[1-9]\d*)…`
+        # accepted "0" and "0.0" — they would round-trip through
+        # _usdc_to_raw_units and fail at the runtime "must be positive"
+        # check, which the LLM can't react to as cleanly as a schema-level
+        # rejection. Require at least one non-zero digit somewhere.
+        if not re.match(r"^(?:[1-9]\d*(?:\.\d+)?|0?\.0*[1-9]\d*)$", v):
             raise ValueError("deposit_usdc must be a positive decimal string")
         return v
 

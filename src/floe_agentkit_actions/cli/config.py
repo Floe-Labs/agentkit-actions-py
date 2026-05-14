@@ -92,7 +92,7 @@ def load_config() -> FloeAgentConfig | None:
     try:
         if not path.exists():
             return None
-        raw: dict[str, Any] = json.loads(path.read_text())
+        raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         out: dict[str, Any] = {}
         for key, value in raw.items():
             if key == "agents" and isinstance(value, dict):
@@ -127,7 +127,7 @@ def save_config(config: FloeAgentConfig) -> None:
             out[_CONFIG_TO_JSON[key]] = value
         else:
             out[key] = value
-    path.write_text(json.dumps(out, indent=2) + "\n")
+    path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
 
 
 def has_config() -> bool:
