@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from ..config import list_agents, load_config
+from ..config import list_agents, load_config_or_exit
 from ..keychain import get_agent_key
 
 console = Console()
 
 
 def run_list_command() -> None:
-    config = load_config()
+    config = load_config_or_exit()
     if config is None:
         console.print("[dim]No config found. Run `floe-agent register --name <name>` first.[/dim]")
         return

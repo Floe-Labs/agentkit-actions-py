@@ -7,7 +7,8 @@ from typing import Any
 
 from rich.console import Console
 
-from ..config import FloeAgentConfig, get_agent, load_config, save_config
+from .._prompts import require_prompt
+from ..config import FloeAgentConfig, get_agent, load_config_or_exit, save_config
 from ..floe_api_client import FloeApiClient
 from ..keychain import delete_agent_key
 from ..wallet_factory import create_wallet
@@ -21,21 +22,24 @@ def _resolve_wallet_config(existing: FloeAgentConfig) -> dict[str, Any]:
     import questionary
 
     if (existing.get("wallet_type") or "private-key") == "private-key":
-        pk = os.environ.get("PRIVATE_KEY") or questionary.password("Private key (0x...):").ask()
+        pk = os.environ.get("PRIVATE_KEY") or require_prompt(
+            questionary.password("Private key (0x...):").ask(), "Private key"
+        )
         cfg: dict[str, Any] = {"type": "private-key", "private_key": pk}
         if existing.get("rpc_url"):
             cfg["rpc_url"] = existing["rpc_url"]
         return cfg
-    name = os.environ.get("CDP_API_KEY_NAME") or questionary.text("CDP API Key Name:").ask()
-    key = (
-        os.environ.get("CDP_API_KEY_PRIVATE_KEY")
-        or questionary.password("CDP API Key Private Key:").ask()
+    name = os.environ.get("CDP_API_KEY_NAME") or require_prompt(
+        questionary.text("CDP API Key Name:").ask(), "CDP API Key Name"
+    )
+    key = os.environ.get("CDP_API_KEY_PRIVATE_KEY") or require_prompt(
+        questionary.password("CDP API Key Private Key:").ask(), "CDP API Key Private Key"
     )
     return {"type": "cdp", "api_key_name": name, "api_key_private_key": key}
 
 
 def run_revoke_command(name: str, facilitator_url: str) -> None:
-    config = load_config()
+    config = load_config_or_exit()
     if config is None:
         console.print("[red]No config found.[/red]")
         sys.exit(1)
@@ -87,15 +91,20 @@ def run_revoke_command(name: str, facilitator_url: str) -> None:
             console.print(f"[red]Revoke failed: {err}[/red]")
             sys.exit(1)
 
+    # The server-side key is already gone (or never existed). Persist
+    # revoked=True unconditionally — the backend is the source of truth,
+    # and leaving local state "active" after a successful server revoke
+    # would mislead later `agents` / `rotate` / `run` calls.
     deleted = delete_agent_key(name, agent["facilitator_url"])
+    agent["revoked"] = True
+    save_config(config)
     if deleted:
-        agent["revoked"] = True
-        save_config(config)
         console.print(f"[green]  Local keychain entry for \"{name}\" removed.[/green]")
     else:
-        # Server-side revoke already succeeded; local cleanup is the only
-        # thing left. Don't claim success — surface the partial state so
-        # the user knows to clear the env-var fallback or rerun manually.
+        # Partial cleanup: server-side revoke succeeded but the local
+        # keychain entry could not be deleted (no backend, env-var
+        # fallback, etc.). Surface it so the user knows to clear any
+        # FLOE_AGENT_KEY_* env var manually.
         console.print(
             "[yellow]  Local keychain entry could not be deleted "
             "(no keyring backend or already absent). "

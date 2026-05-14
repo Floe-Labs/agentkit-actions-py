@@ -23,7 +23,7 @@ from .config import (
     FloeAgentConfig,
     get_agent,
     list_agents,
-    load_config,
+    load_config_or_exit,
     save_config,
 )
 from .display import print_banner, print_help, print_session_info
@@ -99,6 +99,24 @@ def _parse_flag(args: list[str], name: str) -> str | None:
     return None
 
 
+def _parse_int_flag(raw: str | None, flag: str) -> int | None:
+    """Parse a numeric CLI flag; print a clean error + exit on bad input.
+
+    Returns ``None`` when the flag is unset. Direct ``int(...)`` would
+    surface a Python traceback to the user on a typo like
+    ``--max-rate-bps abc``; this normalises it to a one-line CLI error.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        console.print(
+            f"[red]Invalid value for --{flag}: {raw!r} (expected integer).[/red]"
+        )
+        sys.exit(1)
+
+
 def run() -> None:
     """Entry point for the CLI."""
     args = sys.argv[1:]
@@ -126,15 +144,13 @@ def run() -> None:
             or os.environ.get("FLOE_FACILITATOR_URL")
             or "https://x402.floe.xyz"
         )
-        raw_rate = _parse_flag(rest, "max-rate-bps")
-        raw_expiry = _parse_flag(rest, "expiry-days")
         run_register_command(
             RegisterArgs(
                 name=name,
                 facilitator_url=facilitator_url,
                 borrow_limit_usdc=_parse_flag(rest, "borrow-limit"),
-                max_rate_bps=int(raw_rate) if raw_rate else None,
-                expiry_days=int(raw_expiry) if raw_expiry else None,
+                max_rate_bps=_parse_int_flag(_parse_flag(rest, "max-rate-bps"), "max-rate-bps"),
+                expiry_days=_parse_int_flag(_parse_flag(rest, "expiry-days"), "expiry-days"),
                 label=_parse_flag(rest, "label"),
             )
         )
@@ -158,7 +174,7 @@ def run() -> None:
         if not rest:
             console.print("[red]`revoke` requires an agent name.[/red]")
             sys.exit(1)
-        config = load_config()
+        config = load_config_or_exit()
         agent = get_agent(config, rest[0]) if config else None
         facilitator_url = (
             (agent or {}).get("facilitator_url")
@@ -169,18 +185,21 @@ def run() -> None:
         run_revoke_command(rest[0], facilitator_url)
         return
     if sub == "open-credit-line":
-        name = _parse_flag(rest, "name") or (rest[0] if rest else None)
+        # Accept `--name foo` OR a bare positional `foo`, but reject the
+        # case where the first token is actually another flag (e.g.
+        # `floe-agent open-credit-line --deposit 100`) so we don't
+        # silently treat `--deposit` as the agent name.
+        positional_name = rest[0] if rest and not rest[0].startswith("-") else None
+        name = _parse_flag(rest, "name") or positional_name
         if not name:
             console.print("[red]`open-credit-line` requires --name <name>.[/red]")
             sys.exit(1)
-        raw_ltv = _parse_flag(rest, "max-ltv-bps")
-        raw_rate = _parse_flag(rest, "max-rate-bps")
         run_open_credit_line_command(
             OpenCreditLineArgs(
                 name=name,
                 deposit_usdc=_parse_flag(rest, "deposit"),
-                max_ltv_bps=int(raw_ltv) if raw_ltv else None,
-                max_rate_bps=int(raw_rate) if raw_rate else None,
+                max_ltv_bps=_parse_int_flag(_parse_flag(rest, "max-ltv-bps"), "max-ltv-bps"),
+                max_rate_bps=_parse_int_flag(_parse_flag(rest, "max-rate-bps"), "max-rate-bps"),
             )
         )
         return
@@ -193,7 +212,7 @@ def run() -> None:
     # wallet/AI prompts only to discover at the very end that the agent
     # name was a typo.
     if explicit_agent:
-        cfg = load_config()
+        cfg = load_config_or_exit()
         if not cfg or not get_agent(cfg, explicit_agent):
             console.print(
                 f"[red]Unknown agent \"{explicit_agent}\". "
@@ -223,7 +242,7 @@ def _resolve_agent_context(
 def _run_interactive(explicit_agent: str | None = None) -> None:
     print_banner()
 
-    saved_config = load_config()
+    saved_config = load_config_or_exit()
 
     if (
         saved_config

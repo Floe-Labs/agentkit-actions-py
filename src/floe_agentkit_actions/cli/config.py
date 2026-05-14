@@ -15,6 +15,7 @@ verbatim so an older CLI never strips forward-compatible data on save.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -86,13 +87,32 @@ def _agent_to_json(record: AgentRecord) -> dict[str, Any]:
     return out
 
 
+class ConfigParseError(Exception):
+    """Raised when ``.floe-agent.json`` exists but cannot be parsed.
+
+    Distinct from "no config" (``load_config`` returns ``None``) so the
+    CLI doesn't silently overwrite a malformed file with a fresh one —
+    that would discard the user's registered agents and any forward-
+    compatible fields written by a newer CLI.
+    """
+
+
 def load_config() -> FloeAgentConfig | None:
-    """Load config from .floe-agent.json in the current directory."""
+    """Load config from .floe-agent.json in the current directory.
+
+    Returns ``None`` only when the file does not exist. Parse / decode
+    errors raise :class:`ConfigParseError` so callers can surface a
+    diagnostic instead of treating the file as absent and clobbering it
+    on the next ``save_config`` call.
+    """
     path = _config_path()
+    if not path.exists():
+        return None
     try:
-        if not path.exists():
-            return None
         raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        raise ConfigParseError(f"Failed to read {path}: {err}") from err
+    try:
         out: dict[str, Any] = {}
         for key, value in raw.items():
             if key == "agents" and isinstance(value, dict):
@@ -108,8 +128,8 @@ def load_config() -> FloeAgentConfig | None:
         out.setdefault("wallet_type", "private-key")
         out.setdefault("ai_provider", "openai")
         return cast(FloeAgentConfig, out)
-    except Exception:
-        return None
+    except Exception as err:  # noqa: BLE001 — any conversion failure is a parse error.
+        raise ConfigParseError(f"Failed to parse {path}: {err}") from err
 
 
 def save_config(config: FloeAgentConfig) -> None:
@@ -128,6 +148,27 @@ def save_config(config: FloeAgentConfig) -> None:
         else:
             out[key] = value
     path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+
+
+def load_config_or_exit() -> FloeAgentConfig | None:
+    """Wrap :func:`load_config` so CLI entry points get a clean failure.
+
+    Returns ``None`` when the file does not exist; prints a diagnostic
+    and exits 1 when the file exists but is malformed. Use this from
+    command handlers — anywhere a bare ``load_config()`` would otherwise
+    swallow the parse error and risk a subsequent ``save_config`` call
+    clobbering the user's existing agents.
+    """
+    try:
+        return load_config()
+    except ConfigParseError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        print(
+            "  Fix the JSON syntax (or delete the file to start over) "
+            "and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def has_config() -> bool:

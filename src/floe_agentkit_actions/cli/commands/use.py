@@ -6,13 +6,13 @@ import sys
 
 from rich.console import Console
 
-from ..config import get_agent, load_config, save_config
+from ..config import get_agent, load_config_or_exit, save_config
 
 console = Console()
 
 
 def run_use_command(name: str) -> None:
-    config = load_config()
+    config = load_config_or_exit()
     if config is None:
         console.print("[red]No config found. Register an agent first.[/red]")
         sys.exit(1)

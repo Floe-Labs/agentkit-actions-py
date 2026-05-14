@@ -488,7 +488,10 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                         f"No agent named \"{name}\" found for this developer. "
                         f"Register one with `grant_credit_delegation` first."
                     )
-                agent_id = int(match["id"])
+                # API serialises camelCase (`agentId`); `id` is kept as a
+                # defensive fallback in case the response shape changes
+                # back. Mirrors floe_api_client.create_agent at L103.
+                agent_id = int(match.get("agentId") or match["id"])
 
             open_resp = self._signed_developer_post(
                 wallet_provider,

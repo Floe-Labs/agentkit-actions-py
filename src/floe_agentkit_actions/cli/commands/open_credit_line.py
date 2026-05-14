@@ -9,7 +9,8 @@ from typing import Any
 
 from rich.console import Console
 
-from ..config import FloeAgentConfig, get_agent, load_config
+from .._prompts import require_prompt
+from ..config import FloeAgentConfig, get_agent, load_config_or_exit
 from ..floe_api_client import FloeApiClient
 from ..wallet_factory import create_wallet
 
@@ -43,21 +44,24 @@ def _resolve_wallet_config(existing: FloeAgentConfig) -> dict[str, Any]:
     import questionary
 
     if (existing.get("wallet_type") or "private-key") == "private-key":
-        pk = os.environ.get("PRIVATE_KEY") or questionary.password("Private key (0x...):").ask()
+        pk = os.environ.get("PRIVATE_KEY") or require_prompt(
+            questionary.password("Private key (0x...):").ask(), "Private key"
+        )
         cfg: dict[str, Any] = {"type": "private-key", "private_key": pk}
         if existing.get("rpc_url"):
             cfg["rpc_url"] = existing["rpc_url"]
         return cfg
-    name = os.environ.get("CDP_API_KEY_NAME") or questionary.text("CDP API Key Name:").ask()
-    key = (
-        os.environ.get("CDP_API_KEY_PRIVATE_KEY")
-        or questionary.password("CDP API Key Private Key:").ask()
+    name = os.environ.get("CDP_API_KEY_NAME") or require_prompt(
+        questionary.text("CDP API Key Name:").ask(), "CDP API Key Name"
+    )
+    key = os.environ.get("CDP_API_KEY_PRIVATE_KEY") or require_prompt(
+        questionary.password("CDP API Key Private Key:").ask(), "CDP API Key Private Key"
     )
     return {"type": "cdp", "api_key_name": name, "api_key_private_key": key}
 
 
 def run_open_credit_line_command(args: OpenCreditLineArgs) -> None:
-    config = load_config()
+    config = load_config_or_exit()
     if config is None:
         console.print("[red]No config found. Register an agent first with `floe-agent register`.[/red]")
         sys.exit(1)
