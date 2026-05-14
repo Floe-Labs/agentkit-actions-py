@@ -87,8 +87,8 @@ def run_open_credit_line_command(args: OpenCreditLineArgs) -> None:
         console.print(f"[red]{err}[/red]")
         sys.exit(1)
 
-    if args.max_ltv_bps is not None and not (1 <= args.max_ltv_bps <= 9500):
-        console.print("[red]max_ltv_bps must be 1..9500 (95% is the USDC/USDC market cap).[/red]")
+    if args.max_ltv_bps is not None and not (1 <= args.max_ltv_bps <= 9950):
+        console.print("[red]max_ltv_bps must be 1..9950.[/red]")
         sys.exit(1)
     if args.max_rate_bps is not None and not (1 <= args.max_rate_bps <= 10000):
         console.print("[red]max_rate_bps must be 1..10000.[/red]")

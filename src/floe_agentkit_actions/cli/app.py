@@ -95,7 +95,12 @@ def _parse_flag(args: list[str], name: str) -> str | None:
     if f"--{name}" in args:
         idx = args.index(f"--{name}")
         if idx + 1 < len(args):
-            return args[idx + 1]
+            candidate = args[idx + 1]
+            # Treat the next token as the value only if it isn't itself
+            # another flag. Otherwise `--name --deposit 100` would silently
+            # bind `name="--deposit"` and misroute downstream parsing.
+            if candidate != "--" and not candidate.startswith("-"):
+                return candidate
     return None
 
 
