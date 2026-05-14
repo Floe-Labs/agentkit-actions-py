@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "floe-agentkit-actions"
-version = "0.3.0"
+version = "0.4.0"
 description = "Coinbase AgentKit ActionProvider for Floe DeFi lending protocol on Base"
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,8 @@ dependencies = [
     "web3>=7.0.0",
     "pydantic>=2.0.0",
     "eth-utils>=5.0.0",
+    "eth-account>=0.13.0",
+    "keyring>=24.0.0",
 ]
 
 [project.urls]

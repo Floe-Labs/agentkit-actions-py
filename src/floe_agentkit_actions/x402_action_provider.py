@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import secrets
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
@@ -15,10 +14,7 @@ from coinbase_agentkit.network import Network
 from pydantic import BaseModel, Field, field_validator
 from web3 import Web3
 
-from .constants import (
-    BASE_MAINNET_MATCHER,
-    ERC20_ABI,
-)
+from .constants import BASE_MAINNET_MATCHER
 from .utils import (
     format_address,
     format_bps,
@@ -29,19 +25,6 @@ from .utils import (
 # ── ABI fragments for operator functions ────────────────────────────────────
 
 OPERATOR_ABI: list[dict[str, Any]] = [
-    {
-        "name": "setOperator",
-        "type": "function",
-        "stateMutability": "nonpayable",
-        "inputs": [
-            {"name": "operator", "type": "address"},
-            {"name": "borrowLimit", "type": "uint256"},
-            {"name": "maxRateBps", "type": "uint256"},
-            {"name": "expiry", "type": "uint256"},
-            {"name": "onBehalfOfRestriction", "type": "address"},
-        ],
-        "outputs": [],
-    },
     {
         "name": "revokeOperator",
         "type": "function",
@@ -88,17 +71,82 @@ def _validate_address(v: str) -> str:
 
 
 class GrantCreditDelegationSchema(BaseModel):
-    facilitator_address: str = Field(description="The facilitator's operator address")
+    name: str = Field(
+        min_length=1,
+        max_length=64,
+        description=(
+            "Human-friendly label for this agent (e.g. 'alpha', 'paid-search-bot'). "
+            "Unique per developer. Used by the CLI/dashboard to identify the agent later."
+        ),
+    )
     facilitator_url: str = Field(description="The facilitator API base URL")
     borrow_limit: str = Field(description="Maximum borrow limit in USDC (e.g. '10000' for $10K)")
     max_rate_bps: str = Field(default="1500", description="Maximum interest rate in basis points")
     expiry_days: str = Field(default="90", description="Number of days until delegation expires")
-    collateral_token: str = Field(description="Collateral token address (WETH or cbBTC)")
 
-    @field_validator("facilitator_address", "collateral_token")
+    @field_validator("name")
     @classmethod
-    def validate_addresses(cls, v: str) -> str:
-        return _validate_address(v)
+    def validate_name(cls, v: str) -> str:
+        if not re.match(r"^[A-Za-z0-9 _-]+$", v):
+            raise ValueError("name must be alphanumeric / space / underscore / hyphen")
+        return v
+
+    @field_validator("facilitator_url")
+    @classmethod
+    def validate_facilitator_url(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ValueError("facilitator_url must use HTTPS")
+        return v
+
+
+class OpenCreditLineSchema(BaseModel):
+    name: str = Field(
+        min_length=1,
+        max_length=64,
+        description=(
+            "The agent name from `grant_credit_delegation` / `floe-agent register`. "
+            "Must already exist server-side."
+        ),
+    )
+    facilitator_url: str = Field(description="The facilitator API base URL (e.g. https://x402.floe.xyz)")
+    deposit_usdc: str = Field(description="USDC deposit amount (e.g. '10000' for $10K)")
+    max_ltv_bps: int = Field(
+        default=9500,
+        ge=1,
+        le=9500,
+        description="Optional LTV cap (1..9500). Default 9500 (95%, the USDC/USDC market cap).",
+    )
+    agent_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Server-issued numeric agent id. Pass when not already known.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not re.match(r"^[A-Za-z0-9 _-]+$", v):
+            raise ValueError("name must be alphanumeric / space / underscore / hyphen")
+        return v
+
+    @field_validator("facilitator_url")
+    @classmethod
+    def validate_facilitator_url(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ValueError("facilitator_url must use HTTPS")
+        return v
+
+    @field_validator("deposit_usdc")
+    @classmethod
+    def validate_deposit(cls, v: str) -> str:
+        # Reject zero up front. The previous pattern `^(0|[1-9]\d*)…`
+        # accepted "0" and "0.0" — they would round-trip through
+        # _usdc_to_raw_units and fail at the runtime "must be positive"
+        # check, which the LLM can't react to as cleanly as a schema-level
+        # rejection. Require at least one non-zero digit somewhere.
+        if not re.match(r"^(?:[1-9]\d*(?:\.\d+)?|0?\.0*[1-9]\d*)$", v):
+            raise ValueError("deposit_usdc must be a positive decimal string")
+        return v
 
 
 class RevokeCreditDelegationSchema(BaseModel):
@@ -192,12 +240,12 @@ class DeleteCreditThresholdSchema(BaseModel):
 
 class EstimateX402CostSchema(BaseModel):
     url: str = Field(description="Target x402-protected URL to preflight.")
-    method: Optional[str] = Field(default=None, description="HTTP method (default GET).")
+    method: str = Field(default="GET", description="HTTP method (default GET).")
 
     @field_validator("method")
     @classmethod
-    def validate_method(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not re.match(r"^[A-Z]{3,7}$", v):
+    def validate_method(cls, v: str) -> str:
+        if not re.match(r"^[A-Z]{3,7}$", v):
             raise ValueError("Method must be 3-7 uppercase letters")
         return v
 
@@ -211,10 +259,12 @@ class X402Config:
         facilitator_url: str = "",
         facilitator_api_key: str = "",
         matcher_address: str = BASE_MAINNET_MATCHER,
+        agent_name: str = "",
     ) -> None:
         self.facilitator_url = facilitator_url
         self.facilitator_api_key = facilitator_api_key
         self.matcher_address = matcher_address
+        self.agent_name = agent_name
 
 
 # ── Provider ─────────────────────────────────────────────────────────────────
@@ -225,8 +275,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         super().__init__("x402", [])
         cfg = config or X402Config()
         self._matcher_address = cfg.matcher_address
-        self._facilitator_url = cfg.facilitator_url
+        self._facilitator_url = cfg.facilitator_url.rstrip("/")
         self._facilitator_api_key = cfg.facilitator_api_key
+        self._agent_name = cfg.agent_name
 
     def supports_network(self, network: Network) -> bool:
         return network.chain_id in ("8453", "84532")
@@ -263,56 +314,30 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             except json.JSONDecodeError:
                 return {"status": e.code, "body": {"error": body_text}, "headers": {}}
 
-    def _ensure_allowance(
-        self,
-        wallet_provider: EvmWalletProvider,
-        token_address: str,
-        spender_address: str,
-        required_amount: int,
-    ) -> str | None:
-        owner = wallet_provider.get_address()
-        current = wallet_provider.read_contract(
-            contract_address=token_address,
-            abi=ERC20_ABI,
-            function_name="allowance",
-            args=[owner, spender_address],
-        )
-        if int(current) >= required_amount:
-            return None
-        contract = _w3.eth.contract(abi=ERC20_ABI)
-        encoded = contract.encode_abi("approve", args=[spender_address, required_amount])
-        return wallet_provider.send_transaction(transaction={"to": token_address, "data": encoded})
-
     # ── grant_credit_delegation ────────────────────────────────────────────
 
     @create_action(
         name="grant_credit_delegation",
         description=(
-            "Grant credit delegation to an x402 facilitator. This allows the facilitator to borrow "
-            "USDC on your behalf using your collateral. You set a maximum borrow limit, interest rate "
-            "cap, and expiry. This action handles pre-registration, setOperator, collateral approval, "
-            "and registration in one step."
+            "Register a new Floe credit agent. Floe creates a managed Privy wallet for the agent, "
+            "delegates the facilitator on-chain server-side, and returns a scoped API key. "
+            "You set a name, maximum borrow limit, interest rate cap, and expiry. "
+            "The developer wallet is only used to sign the auth headers — no on-chain transactions are sent. "
+            "The returned API key is stored for the rest of this session and used by every other x402 action. "
+            "For multi-agent setups, prefer the CLI: `floe-agent register --name <name>` "
+            "(stores the key in the OS keychain)."
         ),
         schema=GrantCreditDelegationSchema,
     )
     def grant_credit_delegation(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            # Validate local inputs BEFORE hitting the facilitator. A
-            # malformed borrow_limit / max_rate_bps / expiry_days previously
-            # would still trigger /agents/pre-register (creating Privy
-            # state on the facilitator side) before the local validation
-            # rejected the call. Fail fast to keep the facilitator clean.
-            #
-            # Precise decimal→USDC raw conversion. Parsing via float is a
-            # money-math bug: `int(float("1.5")) == 1` silently drops $0.50,
-            # and larger amounts can lose more to float rounding. Use Decimal
-            # end-to-end so fractional inputs like "1500.25" produce
-            # 1_500_250_000 raw units exactly.
             usdc_decimals = 6
             try:
                 borrow_limit_decimal = Decimal(str(args["borrow_limit"]))
                 max_rate_bps = int(args["max_rate_bps"])
                 expiry_days = int(args["expiry_days"])
+                name = str(args["name"])
+                facilitator_url = str(args["facilitator_url"]).rstrip("/")
             except KeyError as e:
                 return f"Invalid delegation input: missing required field {e.args[0]!r}"
             except (InvalidOperation, TypeError, ValueError) as e:
@@ -322,102 +347,257 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                     f"borrow_limit must be positive, got '{args['borrow_limit']}'. "
                     "A zero or negative credit line cannot be delegated."
                 )
-            if max_rate_bps <= 0:
-                return f"max_rate_bps must be positive, got {max_rate_bps}."
-            if expiry_days <= 0:
-                return f"expiry_days must be positive, got {expiry_days}."
+            if not (1 <= max_rate_bps <= 10000):
+                return f"max_rate_bps must be between 1 and 10000, got {max_rate_bps}."
+            if not (1 <= expiry_days <= 3650):
+                return f"expiry_days must be between 1 and 3650, got {expiry_days}."
             scaled = borrow_limit_decimal * (Decimal(10) ** usdc_decimals)
             if scaled != scaled.to_integral_value():
                 return (
                     f"borrow_limit '{args['borrow_limit']}' has more precision than "
                     f"USDC supports ({usdc_decimals} decimals). Reduce the precision."
                 )
-            borrow_limit_raw = int(scaled)
-            expiry_ts = int(time.time()) + expiry_days * 86400
-            # Bound-check against uint256 before encoding calldata. Python's
-            # arbitrary-precision int otherwise lets oversized inputs through
-            # local validation only to fail later at ABI encode time with a
-            # less-actionable error. All three fields are uint256 in OPERATOR_ABI.
-            max_uint256 = (1 << 256) - 1
-            for field_name, value in (
-                ("borrow_limit", borrow_limit_raw),
-                ("max_rate_bps", max_rate_bps),
-                ("expiry", expiry_ts),
-            ):
-                if value > max_uint256:
-                    return f"{field_name} is too large for uint256 ({value})."
+            borrow_limit_raw = str(int(scaled))
+            expiry_seconds = expiry_days * 86400
 
-            agent_address = wallet_provider.get_address()
-            facilitator_url = args["facilitator_url"]
-            # Set facilitator URL before first API call
+            # Set the facilitator URL for downstream actions in this session.
             self._facilitator_url = facilitator_url
 
-            # Step 1: Pre-register
-            nonce = f"{int(time.time())}-{secrets.token_hex(8)}"
-            sign_message = f"Register with Floe Facilitator\nNonce: {nonce}"
-            signature = wallet_provider.sign_message(sign_message)
-
-            pre_reg = self._facilitator_fetch("/agents/pre-register", "POST", {
-                "walletAddress": agent_address, "signature": signature, "nonce": nonce,
-            })
-            if pre_reg["status"] != 201 and pre_reg["status"] != 200:
-                return f"Pre-registration failed: {pre_reg['body'].get('error', 'Unknown error')}"
-
-            privy_wallet = pre_reg["body"]["privyWalletAddress"]
-
-            # Step 2: setOperator
-
-            contract = _w3.eth.contract(abi=OPERATOR_ABI)
-            encoded = contract.encode_abi("setOperator",
-                args=[args["facilitator_address"], borrow_limit_raw, max_rate_bps, expiry_ts, privy_wallet],
+            # Step 1: create the managed agent. Server provisions Privy
+            # wallet + setOperator() delegation in-flight; we just wait
+            # for the result.
+            create_resp = self._signed_developer_post(
+                wallet_provider,
+                "/v1/developer/agents",
+                {
+                    "name": name,
+                    "borrowLimitRaw": borrow_limit_raw,
+                    "maxRateBps": max_rate_bps,
+                    "expirySeconds": expiry_seconds,
+                },
             )
-            set_op_tx = wallet_provider.send_transaction(
-                transaction={"to": self._matcher_address, "data": encoded}
+            if create_resp["status"] not in (200, 201):
+                err = create_resp["body"]
+                detail = (err or {}).get("detail") or (err or {}).get("error") or "unknown error"
+                return f"Agent creation failed: {detail}"
+            created = create_resp["body"]
+            agent_id = int(created["agentId"])
+
+            # Step 2: mint an API key for the freshly-created agent. Auth
+            # headers expire after 5 minutes; we re-sign rather than reuse.
+            key_resp = self._signed_developer_post(
+                wallet_provider,
+                f"/v1/developer/agents/{agent_id}/keys",
+                {"label": name},
             )
-
-            # Step 3: Approve collateral (max approval — agent controls via delegation limits)
-            approval_amount = 2**256 - 1  # type(uint256).max
-            approve_tx = self._ensure_allowance(
-                wallet_provider, args["collateral_token"], self._matcher_address, approval_amount,
-            )
-
-            # Step 4: Register
-            reg_nonce = f"{int(time.time())}-{secrets.token_hex(8)}"
-            reg_message = f"Register with Floe Facilitator\nNonce: {reg_nonce}"
-            reg_signature = wallet_provider.sign_message(reg_message)
-
-            reg = self._facilitator_fetch("/agents/register", "POST", {
-                "walletAddress": agent_address, "signature": reg_signature, "nonce": reg_nonce,
-            })
-            if reg["status"] != 201 and reg["status"] != 200:
+            if key_resp["status"] not in (200, 201):
+                err = key_resp["body"]
+                detail = (err or {}).get("detail") or (err or {}).get("error") or "unknown error"
                 return (
-                    f"Registration failed (delegation set on-chain): {reg['body'].get('error', '')}. "
-                    "Retry registration later — on-chain delegation is active."
+                    f"Agent created (id={agent_id}) but key minting failed: {detail}. "
+                    f"Mint a key via the dashboard or `floe-agent rotate {name}` to recover."
                 )
+            key_body = key_resp["body"]
 
-            result = reg["body"]
-            self._facilitator_api_key = result.get("apiKey", "")
-            self._facilitator_url = facilitator_url
+            # Store for subsequent calls in this session.
+            self._facilitator_api_key = key_body["key"]
+            self._agent_name = name
 
-            credit_limit = format_token_amount(int(result.get("creditLimit", "0")), usdc_decimals, "USDC")
+            credit_limit = format_token_amount(int(borrow_limit_raw), usdc_decimals, "USDC")
+            api_key = key_body["key"]
+            key_preview = api_key[-4:]
 
             lines = [
-                "## Credit Delegation Granted\n",
-                f"**Facilitator**: {format_address(args['facilitator_address'])}",
-                f"**Privy Wallet**: {format_address(result.get('privyWalletAddress', ''))}",
+                "## Floe Agent Registered\n",
+                f"**Name**: {name}",
+                f"**Agent ID**: {agent_id}",
+                f"**Status**: {created.get('status', 'active')}",
+                f"**Privy Wallet**: {format_address(created.get('privyWalletAddress', ''))}",
                 f"**Credit Limit**: {credit_limit}",
                 f"**Max Rate**: {format_bps(max_rate_bps)} APR",
-                f"**Expires**: {format_duration(int(args['expiry_days']) * 86400)}",
+                f"**Expires**: {format_duration(expiry_seconds)}",
+                f"**Delegation tx**: {created.get('delegationTxHash', '')}",
                 "",
-                f"**setOperator tx**: {set_op_tx}",
-                f"**Approval tx**: {approve_tx}" if approve_tx else "**Approval**: Already sufficient",
+                f"> API key stored for this session (ending ...{key_preview}).",
+                f"> For persistent storage across sessions, prefer `floe-agent register --name {name}`"
+                " from the CLI — it saves the key to your OS keychain.",
                 "",
-                f"> **API Key**: `{result.get('apiKey', '')}`",
-                "> Save this key — it won't be shown again.",
+                "> **Next step:** the agent's Privy wallet has no USDC yet, so its credit line is not yet open.",
+                f"> Fund the Privy wallet (`{created.get('privyWalletAddress', '')}`) with USDC, then call `open_credit_line`",
+                f"> (or `floe-agent open-credit-line --name {name} --deposit <usdc>` from the CLI).",
             ]
             return "\n".join(lines)
-        except Exception as e:
-            return f"Error granting credit delegation: {e}"
+        except Exception as e:  # noqa: BLE001
+            return f"Error registering Floe agent: {e}"
+
+    # ── open_credit_line ───────────────────────────────────────────────────
+
+    @create_action(
+        name="open_credit_line",
+        description=(
+            "Open the USDC/USDC credit line for a previously-registered Floe agent. "
+            "The agent's Privy wallet must already hold at least `deposit_usdc` USDC "
+            "(fund it via the dashboard's Coinbase on-ramp or a direct on-chain transfer first). "
+            "Floe server-signs the borrow intent FROM the agent's Privy wallet; the solver matches "
+            "it asynchronously and the agent's spendable credit becomes non-zero a few seconds later. "
+            "For multi-agent setups, prefer the CLI: "
+            "`floe-agent open-credit-line --name <name> --deposit <usdc>`."
+        ),
+        schema=OpenCreditLineSchema,
+    )
+    def open_credit_line(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            usdc_decimals = 6
+            try:
+                deposit_decimal = Decimal(str(args["deposit_usdc"]))
+                name = str(args["name"])
+                facilitator_url = str(args["facilitator_url"]).rstrip("/")
+                max_ltv_bps = int(args.get("max_ltv_bps", 9500))
+                explicit_agent_id = args.get("agent_id")
+            except KeyError as e:
+                return f"Invalid open_credit_line input: missing required field {e.args[0]!r}"
+            except (InvalidOperation, TypeError, ValueError) as e:
+                return f"Invalid open_credit_line input: {e}"
+
+            if deposit_decimal <= 0:
+                return f"deposit_usdc must be positive, got {args['deposit_usdc']!r}."
+            scaled = deposit_decimal * (Decimal(10) ** usdc_decimals)
+            if scaled != scaled.to_integral_value():
+                return (
+                    f"deposit_usdc '{args['deposit_usdc']}' has more precision than "
+                    f"USDC supports ({usdc_decimals} decimals)."
+                )
+            deposit_raw = str(int(scaled))
+
+            self._facilitator_url = facilitator_url
+
+            # Resolve agent id by listing developer agents when not supplied.
+            agent_id: int
+            if explicit_agent_id is not None:
+                agent_id = int(explicit_agent_id)
+            else:
+                list_resp = self._signed_developer_get(wallet_provider, "/v1/developer/agents")
+                if list_resp["status"] not in (200, 201):
+                    err = list_resp["body"]
+                    detail = (err or {}).get("detail") or (err or {}).get("error") or "unknown error"
+                    return f"Failed to list agents: {detail}"
+                agents = (list_resp["body"] or {}).get("agents", [])
+                match = next((a for a in agents if a.get("name") == name), None)
+                if not match:
+                    return (
+                        f"No agent named \"{name}\" found for this developer. "
+                        f"Register one with `grant_credit_delegation` first."
+                    )
+                # API serialises camelCase (`agentId`); `id` is kept as a
+                # defensive fallback in case the response shape changes
+                # back. Mirrors floe_api_client.create_agent at L103.
+                agent_id = int(match.get("agentId") or match["id"])
+
+            open_resp = self._signed_developer_post(
+                wallet_provider,
+                f"/v1/developer/agents/{agent_id}/open-credit-line",
+                {"depositRaw": deposit_raw, "maxLtvBps": max_ltv_bps},
+            )
+            if open_resp["status"] not in (200, 201):
+                err = open_resp["body"]
+                detail = (err or {}).get("detail") or (err or {}).get("error") or "unknown error"
+                return f"Open credit line failed: {detail}"
+            result = open_resp["body"]
+
+            lines = [
+                "## Credit Line Submitted\n",
+                f"**Agent**: {name} (id={agent_id})",
+                f"**Deposit**: {format_token_amount(int(result.get('collateralAmountRaw', '0')), usdc_decimals, 'USDC')}",
+                f"**Borrow**: {format_token_amount(int(result.get('principalRaw', '0')), usdc_decimals, 'USDC')}",
+                f"**Register tx**: {result.get('registerTxHash', '')}",
+            ]
+            if result.get("approveTxHash"):
+                lines.append(f"**Approve tx**: {result['approveTxHash']}")
+            lines.append("")
+            lines.append(
+                f"> Status: `{result.get('status', 'pending_on_chain')}`. "
+                "The solver matches asynchronously; spendable credit becomes non-zero "
+                "once status flips to `active` (usually a few seconds)."
+            )
+            return "\n".join(lines)
+        except Exception as e:  # noqa: BLE001
+            return f"Error opening credit line: {e}"
+
+    def _signed_developer_get(
+        self,
+        wallet_provider: EvmWalletProvider,
+        path: str,
+    ) -> dict[str, Any]:
+        """GET a Floe developer route with wallet-signed auth headers."""
+        import urllib.error
+        import urllib.request
+
+        if not self._facilitator_url:
+            raise ValueError("facilitator_url not configured")
+        timestamp = str(int(time.time()))
+        message = f"Floe Credit API\nTimestamp: {timestamp}"
+        signature = wallet_provider.sign_message(message)
+        address = wallet_provider.get_address()
+        headers = {
+            "Content-Type": "application/json",
+            "X-Wallet-Address": address,
+            "X-Signature": signature,
+            "X-Timestamp": timestamp,
+        }
+        url = f"{self._facilitator_url}{path}"
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return {"status": resp.status, "body": json.loads(resp.read() or b"null")}
+        except urllib.error.HTTPError as err:
+            raw = err.read().decode() if err.fp else ""
+            try:
+                return {"status": err.code, "body": json.loads(raw)}
+            except json.JSONDecodeError:
+                return {"status": err.code, "body": {"error": raw or err.reason}}
+
+    def _signed_developer_post(
+        self,
+        wallet_provider: EvmWalletProvider,
+        path: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST to a Floe developer route with wallet-signed auth headers."""
+        import urllib.error
+        import urllib.request
+
+        if not self._facilitator_url:
+            raise ValueError("facilitator_url not configured")
+
+        timestamp = str(int(time.time()))
+        message = f"Floe Credit API\nTimestamp: {timestamp}"
+        signature = wallet_provider.sign_message(message)
+        address = wallet_provider.get_address()
+        headers = {
+            "Content-Type": "application/json",
+            "X-Wallet-Address": address,
+            "X-Signature": signature,
+            "X-Timestamp": timestamp,
+        }
+
+        url = f"{self._facilitator_url}{path}"
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return {"status": resp.status, "body": json.loads(resp.read() or b"null")}
+        except urllib.error.HTTPError as err:
+            raw = err.read().decode() if err.fp else ""
+            try:
+                return {"status": err.code, "body": json.loads(raw)}
+            except json.JSONDecodeError:
+                return {"status": err.code, "body": {"error": raw or err.reason}}
 
     # ── revoke_credit_delegation ───────────────────────────────────────────
 
@@ -489,7 +669,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             lines = [
                 "## Credit Delegation Status\n",
                 f"**Facilitator**: {format_address(args['facilitator_address'])}",
-                f"**Status**: {'⚠️ Expired' if is_expired else ('✅ Active' if approved else '❌ Not Active')}",
+                f"**Status**: {'Expired' if is_expired else ('Active' if approved else 'Not Active')}",
                 "",
                 f"**Borrow Limit**: {format_token_amount(int(borrow_limit), usdc_decimals, 'USDC')}",
                 f"**Borrowed**: {format_token_amount(int(borrowed), usdc_decimals, 'USDC')}",
@@ -501,9 +681,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             if str(on_behalf_of) != _ZERO_ADDRESS:
                 lines.append(f"**Funds Route To**: {format_address(str(on_behalf_of))}")
             if near_expiry:
-                lines.append("\n⚠️ **Delegation expiring soon!** Renew via `grant_credit_delegation`.")
+                lines.append("\n**Delegation expiring soon!** Renew via `grant_credit_delegation`.")
             if is_expired and approved:
-                lines.append("\n⚠️ **Delegation is expired.** No new borrows can be made.")
+                lines.append("\n**Delegation is expired.** No new borrows can be made.")
 
             return "\n".join(lines)
         except Exception as e:
@@ -569,7 +749,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 f"**Credit Used**: {format_token_amount(int(data.get('creditUsed', '0')), usdc_decimals, 'USDC')}",
                 f"**Credit Available**: {format_token_amount(int(data.get('creditAvailable', '0')), usdc_decimals, 'USDC')}",
                 f"**Active Loans**: {len(data.get('activeLoans', []))}",
-                f"**Delegation Active**: {'✅ Yes' if data.get('delegationActive') else '❌ No'}",
+                f"**Delegation Active**: {'Yes' if data.get('delegationActive') else 'No'}",
             ])
         except Exception as e:
             return f"Error fetching balance: {e}"
@@ -602,8 +782,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             lines = ["## Recent Transactions\n"]
             for tx in txns:
                 amount = format_token_amount(int(tx.get("paymentAmountRaw", "0")), usdc_decimals, "USDC") if tx.get("paymentAmountRaw") else "—"
-                status_icon = {"success": "✅", "passthrough": "🔄"}.get(tx.get("status", ""), "❌")
-                lines.append(f"{status_icon} **{tx.get('method', '?')}** {tx.get('targetUrl', '?')}")
+                status_tag = {"success": "[ok]", "passthrough": "[passthrough]"}.get(tx.get("status", ""), "[failed]")
+                lines.append(f"{status_tag} **{tx.get('method', '?')}** {tx.get('targetUrl', '?')}")
                 lines.append(f"   Amount: {amount} | {tx.get('createdAt', '?')}")
                 if tx.get("x402TxHash"):
                     lines.append(f"   Tx: {tx['x402TxHash']}")
