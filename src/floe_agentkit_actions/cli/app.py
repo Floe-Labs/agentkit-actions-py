@@ -134,6 +134,26 @@ def run() -> None:
     sub = args[0] if args else None
     rest = args[1:]
 
+    known_subcommands = {
+        "run",
+        "register",
+        "agents",
+        "list",
+        "use",
+        "rotate",
+        "revoke",
+        "open-credit-line",
+    }
+
+    # A non-flag first token that isn't a known subcommand is almost
+    # always a typo (e.g. `regitser`). Fail fast instead of silently
+    # dropping into the REPL where the user fills out wallet/AI prompts
+    # before learning the command was unrecognised.
+    if sub and not sub.startswith("-") and sub not in known_subcommands:
+        console.print(f"[red]Unknown command: {sub}[/red]")
+        _print_root_help()
+        sys.exit(1)
+
     if sub == "register":
         name = _parse_flag(rest, "name")
         if not name:

@@ -104,9 +104,11 @@ def run_register_command(args: RegisterArgs) -> None:
     )
 
     if not (1 <= max_rate_bps <= 10000):
-        raise ValueError("max_rate_bps must be between 1 and 10000")
+        console.print("[red]max_rate_bps must be between 1 and 10000[/red]")
+        sys.exit(1)
     if not (1 <= expiry_days <= 3650):
-        raise ValueError("expiry_days must be between 1 and 3650")
+        console.print("[red]expiry_days must be between 1 and 3650[/red]")
+        sys.exit(1)
 
     try:
         borrow_limit_raw = _usdc_to_raw(borrow_limit_usdc)

@@ -18,7 +18,7 @@ _console = Console()
 
 def require_prompt(value: str | None, label: str) -> str:
     """Return ``value`` or exit cleanly if the user cancelled the prompt."""
-    if value is None or value == "":
+    if value is None or value.strip() == "":
         _console.print(f"[red]{label} is required.[/red]")
         sys.exit(1)
     return value

@@ -74,9 +74,12 @@ def run_open_credit_line_command(args: OpenCreditLineArgs) -> None:
 
     import questionary
 
-    deposit_usdc = args.deposit_usdc or questionary.text(
-        "Deposit (USDC, will be locked as collateral, e.g. 10000):", default="10000"
-    ).ask()
+    deposit_usdc = args.deposit_usdc or require_prompt(
+        questionary.text(
+            "Deposit (USDC, will be locked as collateral, e.g. 10000):", default="10000"
+        ).ask(),
+        "Deposit amount",
+    )
 
     try:
         deposit_raw = _usdc_to_raw(deposit_usdc)
