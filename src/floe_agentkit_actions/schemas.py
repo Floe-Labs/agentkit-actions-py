@@ -693,12 +693,29 @@ class RenewCreditLineSchema(BaseModel):
 class InstantBorrowSchema(BaseModel):
     """Input schema for instant_borrow — auto-select best offer + match."""
 
-    market_id: str = Field(description="The market ID (bytes32).")
+    market_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "The market ID (bytes32). Optional — omit to use the canonical "
+            "USDC/USDC same-token market on Base Mainnet, which is the "
+            "recommended default for AI agents (no price risk, only "
+            "interest-accrual liquidation). Pass an explicit market ID only "
+            "when borrowing against a volatile collateral like WETH or cbBTC."
+        ),
+    )
     borrow_amount: str = Field(description="Amount to borrow in raw token units.")
     collateral_amount: str = Field(description="Collateral to post in raw token units.")
     max_interest_rate_bps: str = Field(description="Max acceptable annual interest rate in bps.")
     duration: str = Field(description="Loan duration in seconds.")
-    min_ltv_bps: str = Field(default="8000", description="Minimum LTV in bps (default: 8000 = 80%).")
+    min_ltv_bps: str = Field(
+        default="8000",
+        description=(
+            "Minimum LTV in bps (default: 8000 = 80%). For agents pushing the "
+            "USDC/USDC market up to 99% LTV, set this to '9900'. Same-token "
+            "markets require only a 50bps gap to the lender's max_ltv_bps; "
+            "volatile markets require 800bps."
+        ),
+    )
     on_behalf_of: Optional[str] = Field(
         default=None,
         description="Optional address to receive borrowed USDC. If omitted, sent to your wallet.",
@@ -706,7 +723,9 @@ class InstantBorrowSchema(BaseModel):
 
     @field_validator("market_id")
     @classmethod
-    def validate_market_id(cls, v: str) -> str:
+    def validate_market_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         return _validate_bytes32(v)
 
     @field_validator("on_behalf_of")
