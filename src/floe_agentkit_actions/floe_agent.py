@@ -27,29 +27,55 @@ import urllib.error
 
 DEFAULT_BASE_URL = "https://credit-api.floelabs.xyz"
 DEFAULT_TIMEOUT_SECONDS = 15.0
+USDC_DECIMALS = 6
+USDC_SCALE = 10**USDC_DECIMALS
+
+
+def _raw_to_dollars(raw: Optional[str]) -> float:
+    """Convert a raw USDC integer string (6 decimals) to a dollar float."""
+    if not raw:
+        return 0.0
+    try:
+        return int(raw) / USDC_SCALE
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
-class X402FetchResult:
+class FetchResult:
     status: int
     headers: dict[str, str]
     body: str
-    cost_raw: Optional[str] = None
-    """USDC paid for this call (raw 6-decimal units, integer string).
-    None for free passthrough responses or when the facilitator did not set
-    the X-Floe-Cost-USDC header."""
+    cost: float = 0.0
+    """Dollar amount paid for this call (0 for free passthrough)."""
     idempotent_replay: bool = False
     """True when this was a cached replay against the same idempotency key."""
+    cost_raw: Optional[str] = None
+    """Raw 6-decimal USDC integer string. Advanced — prefer ``cost`` for display."""
+
+
+# Backwards compatibility alias.
+X402FetchResult = FetchResult
 
 
 @dataclass
-class BalanceResult:
+class RawBalance:
     credit_limit_raw: str
     credit_used_raw: str
     credit_available_raw: str
     pending_settlements_raw: str
     active_loans: list[dict[str, Any]] = field(default_factory=list)
     delegation_active: bool = False
+
+
+@dataclass
+class BalanceResult:
+    available: float
+    """Dollar amount available to spend right now."""
+    pending: float
+    """Dollar amount currently reserved against in-flight payments."""
+    raw: RawBalance
+    """Raw integer-string fields for advanced callers."""
 
 
 @dataclass
@@ -109,20 +135,18 @@ class FloeAgent:
 
     # ── public API ───────────────────────────────────────────────────────
 
-    def x402_fetch(
+    def fetch(
         self,
         url: str,
         method: str = "GET",
         headers: Optional[dict[str, str]] = None,
         body: Optional[str] = None,
         idempotency_key: Optional[str] = None,
-    ) -> X402FetchResult:
-        """Fetch any URL through the Floe x402 facilitator.
+    ) -> FetchResult:
+        """Call any URL.
 
-        If the URL returns HTTP 402, the facilitator pays automatically from
-        the agent's credit line and retries; the agent code sees the final
-        2xx (or a FloeAgentError if credit is unavailable). Free URLs pass
-        through unchanged.
+        If the API is x402-gated, payment happens automatically (debited
+        from your prepaid balance). Free URLs pass through unchanged.
         """
         extra: dict[str, str] = {}
         if idempotency_key:
@@ -136,27 +160,53 @@ class FloeAgent:
         )
 
         if status >= 400:
-            self._raise_from_response(status, raw_body, "x402_fetch")
+            self._raise_from_response(status, raw_body, "fetch")
 
-        return X402FetchResult(
+        cost_raw = response_headers.get("x-floe-cost-usdc")
+        return FetchResult(
             status=status,
             headers=response_headers,
             body=raw_body,
-            cost_raw=response_headers.get("x-floe-cost-usdc"),
+            cost=_raw_to_dollars(cost_raw),
+            cost_raw=cost_raw,
             idempotent_replay=response_headers.get("x-floe-idempotent-replay") == "true",
         )
 
-    def get_balance(self) -> BalanceResult:
-        """Check the agent's credit limit, used, available, and active loans."""
-        data = self._json_request("GET", "/v1/agents/balance", operation="get_balance")
+    # Backwards compatibility alias — `fetch` is the recommended name.
+    x402_fetch = fetch
+
+    def balance(self) -> float:
+        """Return the agent's spendable balance in dollars.
+
+        For most code this is the one number you want::
+
+            if agent.balance() < 5:
+                top_up()
+
+        For full detail (pending settlements, raw integer units, active
+        working-capital loans), call ``balance_details()``.
+        """
+        return self.balance_details().available
+
+    def balance_details(self) -> BalanceResult:
+        """Full balance breakdown including pending settlements and raw values."""
+        data = self._json_request("GET", "/v1/agents/balance", operation="balance")
+        pending_raw = data.get("pendingSettlements", "0")
         return BalanceResult(
-            credit_limit_raw=data["creditLimit"],
-            credit_used_raw=data["creditUsed"],
-            credit_available_raw=data["creditAvailable"],
-            pending_settlements_raw=data.get("pendingSettlements", "0"),
-            active_loans=data.get("activeLoans", []),
-            delegation_active=data.get("delegationActive", False),
+            available=_raw_to_dollars(data["creditAvailable"]),
+            pending=_raw_to_dollars(pending_raw),
+            raw=RawBalance(
+                credit_limit_raw=data["creditLimit"],
+                credit_used_raw=data["creditUsed"],
+                credit_available_raw=data["creditAvailable"],
+                pending_settlements_raw=pending_raw,
+                active_loans=data.get("activeLoans", []),
+                delegation_active=data.get("delegationActive", False),
+            ),
         )
+
+    # Backwards compatibility alias.
+    get_balance = balance_details
 
     def get_transactions(
         self,
@@ -177,17 +227,24 @@ class FloeAgent:
             has_more=data.get("hasMore", False),
         )
 
-    def estimate_x402_cost(self, url: str, method: str = "GET") -> dict[str, Any]:
-        """Preview an x402 call without paying.
+    def estimate_cost(self, url: str, method: str = "GET") -> dict[str, Any]:
+        """Preview the cost of calling a URL without actually paying.
 
-        Returns ``{cost_raw, will_exceed_available, x402}``. Cheap, idempotent,
-        doesn't reserve balance. Use before x402_fetch when you want to make
-        spend/no-spend decisions.
+        Returns ``{"cost": float, "can_afford": bool, "is_paid": bool}``.
+        Cheap, idempotent, doesn't reserve balance.
         """
         from urllib.parse import urlencode
 
         path = f"/v1/x402/estimate?{urlencode({'url': url, 'method': method})}"
-        return self._json_request("GET", path, operation="estimate_x402_cost")
+        raw = self._json_request("GET", path, operation="estimate_cost")
+        return {
+            "cost": _raw_to_dollars(raw.get("costRaw")),
+            "can_afford": not raw.get("willExceedAvailable", False),
+            "is_paid": bool(raw.get("x402", False)),
+        }
+
+    # Backwards compatibility alias.
+    estimate_x402_cost = estimate_cost
 
     # ── internals ────────────────────────────────────────────────────────
 

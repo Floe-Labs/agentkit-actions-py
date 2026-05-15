@@ -12,10 +12,12 @@ from __future__ import annotations
 from .action_provider import FloeActionProvider
 from .floe_agent import (
     BalanceResult,
+    FetchResult,
     FloeAgent,
     FloeAgentError,
+    RawBalance,
     TransactionsResult,
-    X402FetchResult,
+    X402FetchResult,  # deprecated alias for FetchResult
 )
 from .types import FloeConfig
 from .x402_action_provider import X402ActionProvider, X402Config, x402_action_provider
@@ -38,5 +40,6 @@ __all__ = [
     "X402ActionProvider", "X402Config", "x402_action_provider",
     # High-level runtime client (no wallet, no chain knowledge — `floe_*` key only).
     "FloeAgent", "FloeAgentError",
-    "X402FetchResult", "BalanceResult", "TransactionsResult",
+    "FetchResult", "BalanceResult", "RawBalance", "TransactionsResult",
+    "X402FetchResult",  # deprecated alias for FetchResult
 ]
