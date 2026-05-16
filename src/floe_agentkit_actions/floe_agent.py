@@ -27,12 +27,22 @@ import urllib.error
 
 DEFAULT_BASE_URL = "https://credit-api.floelabs.xyz"
 DEFAULT_TIMEOUT_SECONDS = 15.0
+MAX_IDEMPOTENCY_KEY_LENGTH = 255
 USDC_DECIMALS = 6
 USDC_SCALE = 10**USDC_DECIMALS
 
 
 def _raw_to_dollars(raw: Optional[str]) -> float:
-    """Convert a raw USDC integer string (6 decimals) to a dollar float."""
+    """Convert a raw USDC integer string (6 decimals) to a dollar float.
+
+    Display-quality precision only. Python ints are arbitrary-precision, but
+    the division produces a float — which is exact up to ``sys.float_info``'s
+    safe-integer ceiling (~$9.0 × 10^9 of USDC). Real-world agent balances
+    sit well below that, so this is fine for showing dollars. Settlement-
+    grade code (on-chain math, accounting reconciliation) should keep using
+    the raw integer strings on ``FetchResult.cost_raw`` /
+    ``RawBalance.*_raw`` and never round-trip through this function.
+    """
     if not raw:
         return 0.0
     try:
@@ -129,9 +139,23 @@ class FloeAgent:
                 "FloeAgent: api_key must be a `floe_…` runtime key "
                 "(mint one with `floe-agent register`)."
             )
+        # Reject 0, negative, NaN, +/-Infinity — urllib treats these
+        # inconsistently (0 = no timeout on some platforms; NaN raises a
+        # TypeError deep inside socket code). Fail fast at construction.
+        import math
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError(
+                f"FloeAgent: timeout_seconds must be a finite positive number "
+                f"(got {timeout_seconds!r})."
+            )
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = float(timeout_seconds)
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -149,7 +173,16 @@ class FloeAgent:
         from your prepaid balance). Free URLs pass through unchanged.
         """
         extra: dict[str, str] = {}
-        if idempotency_key:
+        if idempotency_key is not None:
+            if (
+                len(idempotency_key) == 0
+                or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH
+            ):
+                raise FloeAgentError(
+                    f"idempotency_key must be 1..{MAX_IDEMPOTENCY_KEY_LENGTH} "
+                    f"characters (got {len(idempotency_key)}).",
+                    400,
+                )
             extra["Idempotency-Key"] = idempotency_key
 
         status, response_headers, raw_body = self._request(
@@ -277,18 +310,39 @@ class FloeAgent:
             response_body = e.read().decode("utf-8") if e.fp else ""
             response_headers = {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
             return e.code, response_headers, response_body
-        except urllib.error.URLError as e:
-            raise FloeAgentError(f"Network error reaching {url}: {e.reason}", 0) from e
         except TimeoutError as e:
             raise FloeAgentError(
-                f"Request timed out after {self._timeout_seconds}s", 408
+                f"Request timed out after {self._timeout_seconds}s",
+                408,
+                "timeout",
+            ) from e
+        except urllib.error.URLError as e:
+            raise FloeAgentError(
+                f"Network error reaching {url}: {e.reason}",
+                0,
+                "network_error",
+            ) from e
+        except OSError as e:
+            # Lower-level socket / DNS errors that don't get wrapped in URLError
+            # (ConnectionResetError, certain SSL errors, etc.). Surface as a
+            # typed error so callers can branch on FloeAgentError uniformly.
+            raise FloeAgentError(
+                f"Network error reaching {url}: {e}", 0, "network_error"
             ) from e
 
     def _json_request(self, method: str, path: str, operation: str) -> dict[str, Any]:
         status, _headers, body = self._request(method, path)
         if status >= 400:
             self._raise_from_response(status, body, operation)
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise FloeAgentError(
+                f"{operation} returned {status} but the body was not valid JSON.",
+                status,
+                "invalid_response_body",
+                body,
+            ) from e
 
     @staticmethod
     def _raise_from_response(status: int, body: str, operation: str) -> None:

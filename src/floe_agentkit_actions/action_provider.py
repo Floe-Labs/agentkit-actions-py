@@ -2935,9 +2935,24 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
         try:
             # Auto-select the canonical USDC/USDC market when no market_id is
             # supplied. Same-token, no oracle dependency, only liquidation
-            # path is unpaid interest — the agent-friendly default. Callers
-            # who need a volatile-collateral market pass market_id explicitly.
-            market_id = args.get("market_id") or BASE_MAINNET_USDC_USDC_MARKET_ID
+            # path is unpaid interest — the agent-friendly default. The market
+            # ID constant is mainnet-specific (chain_id 8453); on other
+            # supported networks (e.g. Base Sepolia, 84532) the same market
+            # does not exist, so a fallback would silently submit against an
+            # invalid market. Force an explicit market_id in those cases.
+            if args.get("market_id"):
+                market_id = args["market_id"]
+            else:
+                network = wallet_provider.get_network()
+                chain_id = str(getattr(network, "chain_id", "") or "")
+                if chain_id != "8453":
+                    return (
+                        f"instant_borrow: market_id is required on chain_id "
+                        f"{chain_id or 'unknown'}. The default USDC/USDC market "
+                        f"only exists on Base Mainnet (chain_id 8453). Pass "
+                        f"market_id explicitly or call get_markets to look one up."
+                    )
+                market_id = BASE_MAINNET_USDC_USDC_MARKET_ID
             borrow_amount = int(args["borrow_amount"])
             max_rate_bps = int(args["max_interest_rate_bps"])
             min_ltv_bps = int(args.get("min_ltv_bps", "8000"))
