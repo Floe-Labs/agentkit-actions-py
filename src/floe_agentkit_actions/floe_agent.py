@@ -19,17 +19,45 @@ borrow flows, use the lower-level ``FloeActionProvider`` /
 from __future__ import annotations
 
 import json
+import math
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
-
-import urllib.request
-import urllib.error
 
 DEFAULT_BASE_URL = "https://credit-api.floelabs.xyz"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 USDC_DECIMALS = 6
 USDC_SCALE = 10**USDC_DECIMALS
+
+
+def _decode_response(payload: bytes, headers: Any) -> str:
+    """Decode an HTTP response body to text using the server-advertised charset.
+
+    ``fetch()`` proxies arbitrary URLs, so the response may be ISO-8859-1,
+    Windows-1252, raw binary, etc. Hardcoding UTF-8 raises UnicodeDecodeError
+    before the caller ever gets a FetchResult or a typed FloeAgentError,
+    breaking the public contract.
+
+    Pulls the charset from Content-Type via ``HTTPMessage.get_content_charset``
+    when available, falls back to UTF-8, and uses ``errors="replace"`` so a
+    malformed body still surfaces as a (best-effort) string instead of
+    blowing up the request.
+    """
+    if not payload:
+        return ""
+    charset: Optional[str] = None
+    getter = getattr(headers, "get_content_charset", None) if headers is not None else None
+    if callable(getter):
+        try:
+            charset = getter()
+        except (LookupError, TypeError):
+            charset = None
+    try:
+        return payload.decode(charset or "utf-8", errors="replace")
+    except (LookupError, UnicodeDecodeError):
+        return payload.decode("utf-8", errors="replace")
 
 
 def _raw_to_dollars(raw: Optional[str]) -> float:
@@ -142,7 +170,6 @@ class FloeAgent:
         # Reject 0, negative, NaN, +/-Infinity — urllib treats these
         # inconsistently (0 = no timeout on some platforms; NaN raises a
         # TypeError deep inside socket code). Fail fast at construction.
-        import math
         if (
             not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
@@ -303,20 +330,24 @@ class FloeAgent:
         req = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout_seconds) as resp:
-                response_body = resp.read().decode("utf-8")
+                response_body = _decode_response(resp.read(), resp.headers)
                 response_headers = {k.lower(): v for k, v in resp.headers.items()}
                 return resp.status, response_headers, response_body
         except urllib.error.HTTPError as e:
-            response_body = e.read().decode("utf-8") if e.fp else ""
+            response_body = _decode_response(e.read(), e.headers) if e.fp else ""
             response_headers = {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
             return e.code, response_headers, response_body
-        except TimeoutError as e:
-            raise FloeAgentError(
-                f"Request timed out after {self._timeout_seconds}s",
-                408,
-                "timeout",
-            ) from e
         except urllib.error.URLError as e:
+            # On Python 3.10+, socket.timeout is an alias of TimeoutError, and
+            # urllib wraps it in URLError(reason=TimeoutError(...)). Detect that
+            # wrapped form here so callers see a typed 408, not a generic
+            # "network error".
+            if isinstance(e.reason, TimeoutError):
+                raise FloeAgentError(
+                    f"Request timed out after {self._timeout_seconds}s",
+                    408,
+                    "timeout",
+                ) from e
             raise FloeAgentError(
                 f"Network error reaching {url}: {e.reason}",
                 0,
