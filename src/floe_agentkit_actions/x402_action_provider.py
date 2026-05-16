@@ -14,7 +14,7 @@ from coinbase_agentkit.network import Network
 from pydantic import BaseModel, Field, field_validator
 from web3 import Web3
 
-from .constants import BASE_MAINNET_MATCHER
+from .constants import BASE_MAINNET_MATCHER, USDC_USDC_MAX_ORIGINATION_LTV_BPS
 from .utils import (
     format_address,
     format_bps,
@@ -113,15 +113,16 @@ class OpenCreditLineSchema(BaseModel):
     max_ltv_bps: int = Field(
         default=9500,
         ge=1,
-        le=9900,
+        le=USDC_USDC_MAX_ORIGINATION_LTV_BPS,
         description=(
-            "Optional LTV cap (1..9900) for the USDC/USDC credit line. Default "
-            "9500 (95%) — the conservative origination ceiling with ~5% "
-            "headroom for interest accrual before liquidation. Values "
-            "9501..9900 enable the aggressive mode, only safe for short-"
-            "duration loans that you repay on a tight cadence: at 9900 (99%) "
-            "with a 12% APR loan you have roughly 30 days before accrued "
-            "interest pushes you past the liquidation threshold."
+            f"Optional LTV cap (1..{USDC_USDC_MAX_ORIGINATION_LTV_BPS}) for the "
+            "USDC/USDC credit line. Default 9500 (95%) — the conservative "
+            "origination ceiling with ~5% headroom for interest accrual before "
+            f"liquidation. Values 9501..{USDC_USDC_MAX_ORIGINATION_LTV_BPS} enable "
+            "the aggressive mode, only safe for short-duration loans that you "
+            f"repay on a tight cadence: at {USDC_USDC_MAX_ORIGINATION_LTV_BPS} "
+            "with a 12% APR loan there is only 50bps of headroom to the 9950bps "
+            "liquidation threshold, which interest closes in roughly 15 days."
         ),
     )
     agent_id: int | None = Field(
