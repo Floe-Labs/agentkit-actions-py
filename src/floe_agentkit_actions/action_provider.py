@@ -24,6 +24,7 @@ from .constants import (
     AERODROME_SWAP_ROUTER_ADDRESS,
     BASE_MAINNET_MATCHER,
     BASE_MAINNET_ORACLE,
+    BASE_MAINNET_USDC_USDC_MARKET_ID,
     BASE_MAINNET_VIEWS,
     BASE_WETH_ADDRESS,
     BASIS_POINTS,
@@ -2922,14 +2923,36 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
             "Instantly borrow funds by auto-selecting the best available lend "
             "intent. Single action: queries the on-chain intent book, picks the "
             "lowest-rate compatible offer, and executes the 2-tx borrow flow. "
-            "For DeFi agents that need capital in seconds, not minutes of "
+            "Defaults to the USDC/USDC same-token market on Base Mainnet when "
+            "`market_id` is omitted — that's the recommended path for AI "
+            "agents (no price risk, only interest-accrual liquidation). For "
+            "DeFi agents that need capital in seconds, not minutes of "
             "browsing. Requires rpc_url in FloeConfig."
         ),
         schema=InstantBorrowSchema,
     )
     def instant_borrow(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            market_id = args["market_id"]
+            # Auto-select the canonical USDC/USDC market when no market_id is
+            # supplied. Same-token, no oracle dependency, only liquidation
+            # path is unpaid interest — the agent-friendly default. The market
+            # ID constant is mainnet-specific (chain_id 8453); on other
+            # supported networks (e.g. Base Sepolia, 84532) the same market
+            # does not exist, so a fallback would silently submit against an
+            # invalid market. Force an explicit market_id in those cases.
+            if args.get("market_id"):
+                market_id = args["market_id"]
+            else:
+                network = wallet_provider.get_network()
+                chain_id = str(getattr(network, "chain_id", "") or "")
+                if chain_id != "8453":
+                    return (
+                        f"instant_borrow: market_id is required on chain_id "
+                        f"{chain_id or 'unknown'}. The default USDC/USDC market "
+                        f"only exists on Base Mainnet (chain_id 8453). Pass "
+                        f"market_id explicitly or call get_markets to look one up."
+                    )
+                market_id = BASE_MAINNET_USDC_USDC_MARKET_ID
             borrow_amount = int(args["borrow_amount"])
             max_rate_bps = int(args["max_interest_rate_bps"])
             min_ltv_bps = int(args.get("min_ltv_bps", "8000"))
@@ -2974,7 +2997,7 @@ class FloeActionProvider(ActionProvider[EvmWalletProvider]):
                 "max_interest_rate_bps": args["max_interest_rate_bps"],
                 "min_ltv_bps": args.get("min_ltv_bps", "8000"),
                 "duration": args["duration"],
-                "market_id": market_id,
+                "market_id": market_id,  # resolved (may be the USDC/USDC default)
                 "matcher_commission_bps": "50",
                 "expiry_seconds": "300",
             }

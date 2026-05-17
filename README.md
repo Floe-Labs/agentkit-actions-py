@@ -5,11 +5,16 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-**The Financial OS for AI Agents — Python SDK.**
+**Credit and payments for AI agent developers — Python SDK. No crypto required.**
 
-Wallet, fiat on/off-ramp, working capital, x402 payments, and portable credit. One SDK. Works with Coinbase AgentKit, LangChain, Claude/Cursor (via MCP), and any framework that speaks HTTP.
+1. **Sign up with email + a funding source.** Card, Apple Pay, Google Pay, or bank transfer. Floe provisions your wallets in the background — no MetaMask, no seed phrase, no gas token.
+2. **Floe issues an x402 credit line to your agent's wallet.** Set spending controls — per-call cap, daily limit, allowed destinations.
+3. **Your agent pays vendors per-call; you get real-time visibility.** Every call is a typed receipt: target URL, amount, status, time. Reconcile, alert, or revoke from the dashboard.
 
-`floe-agentkit-actions` is the official Python SDK — an AgentKit `ActionProvider` exposing 45 actions across the full Floe stack, at full parity with the TypeScript [`floe-agent`](https://github.com/Floe-Labs/agentkit-actions) package.
+`floe-agentkit-actions` is the official Python SDK. The high-level `FloeAgent` client gives you the three-step loop in code; the lower-level action providers expose 45 AgentKit actions for self-custody and framework integrations, at full parity with the TypeScript [`floe-agent`](https://github.com/Floe-Labs/agentkit-actions) package.
+
+- **`FloeAgent(api_key=…)`** — runtime client. No wallet, no chain knowledge. `agent.fetch(url)`, `agent.balance()`, dollars in / dollars out.
+- **`floe_action_provider()`** + **`x402_action_provider()`** — 45 AgentKit actions across the lending and x402 stacks.
 
 > Package name note: the Python distribution is `floe-agentkit-actions` (TS distribution is `floe-agent`). The action surface is identical.
 

@@ -20,6 +20,24 @@ AERODROME_SWAP_ROUTER_ADDRESS: Address = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D
 BASE_WETH_ADDRESS: Address = "0x4200000000000000000000000000000000000006"
 AERODROME_QUOTER_V2_ADDRESS: Address = "0x254cF9E1E6e233aa1AC962CB9B05b2cFeAAe15b0"
 
+# == Canonical Markets =========================================================
+# The USDC/USDC same-token market is the recommended default for AI agents:
+# no price risk (1 USDC == 1 USDC), and the only liquidation path is unpaid
+# interest accrual. SDK actions that accept an optional ``market_id`` fall
+# back to this when the caller omits it, so non-crypto-native developers
+# never need to paste a bytes32 hash for the common case.
+
+BASE_MAINNET_USDC_USDC_MARKET_ID: str = (
+    "0x5027ae5ed5c85380c5dfa34a79915f41f139f4e859f56d15a6f958ea6b662820"
+)
+
+# Origination-LTV ceiling for the USDC/USDC credit-line flow. The protocol's
+# hard liquidation threshold is 9950bps (99.5%); we cap origination at 9900
+# to leave half a percent of half-block-settlement buffer. Anything above
+# 9500 is "aggressive mode" — only safe for short-duration loans because the
+# interest-accrual headroom shrinks proportionally.
+USDC_USDC_MAX_ORIGINATION_LTV_BPS: int = 9900
+
 # == Protocol Constants ========================================================
 
 ORACLE_PRICE_SCALE: int = 10**36
