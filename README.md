@@ -18,6 +18,8 @@
 
 > Package name note: the Python distribution is `floe-agentkit-actions` (TS distribution is `floe-agent`). The action surface is identical.
 
+> **$2 free credit (~200 API calls).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
+
 > **Proof points:** 3,000+ secured working capital lines issued · zero defaults · 13,000+ x402 APIs reachable via the Floe proxy.
 
 ---
