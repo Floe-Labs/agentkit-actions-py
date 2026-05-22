@@ -308,7 +308,13 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def supports_network(self, network: Network) -> bool:
         return network.chain_id in ("8453", "84532")
 
-    def _facilitator_fetch(self, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
+    def _facilitator_fetch(
+        self,
+        path: str,
+        method: str = "GET",
+        body: Any = None,
+        timeout_seconds: float = 30,
+    ) -> dict[str, Any]:
         import urllib.error
         import urllib.request
 
@@ -327,7 +333,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         data = json.dumps(body).encode() if body else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                 return {
                     "status": resp.status,
                     "body": json.loads(resp.read()),
@@ -854,9 +860,17 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
         deadline = _time.monotonic() + timeout_seconds
         path = f"/agents/reservations/{_quote(nonce, safe='')}"
+        last_state: Optional[str] = None
         while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return (
+                    f"Timed out after {timeout_seconds}s waiting for reservation `{nonce}` to settle "
+                    f"(last state: `{last_state}`). Call this action again to resume waiting."
+                )
+            per_call_timeout = max(0.1, min(remaining, 30))
             try:
-                resp = self._facilitator_fetch(path)
+                resp = self._facilitator_fetch(path, timeout_seconds=per_call_timeout)
             except Exception as e:
                 return f"Error polling reservation `{nonce}`: {e}. Call this action again to resume waiting."
             if resp["status"] == 404:
@@ -868,6 +882,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 return f"Error polling reservation: {resp['body'].get('error', 'Unknown')}"
 
             data = resp["body"]
+            last_state = data.get("state", last_state)
             if data.get("terminal"):
                 usdc_decimals = 6
                 # State-aware heading so payment_rejected / expired_unsettled

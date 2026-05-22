@@ -356,7 +356,18 @@ class FloeAgent:
         path = f"/v1/agents/reservations/{_quote(nonce, safe='')}"
         last_state: Optional[str] = None
         while True:
-            data = self._json_request("GET", path, operation="await_settlement")
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FloeAgentError(
+                    f"await_settlement: timed out after {timeout_seconds}s "
+                    f"(last state: {last_state})",
+                    408,
+                    "await_settlement_timeout",
+                )
+            per_call_timeout = min(self._timeout_seconds, remaining)
+            data = self._json_request(
+                "GET", path, operation="await_settlement", timeout=per_call_timeout
+            )
             last_state = data.get("state")
             if data.get("terminal"):
                 return ReservationStatus(
@@ -427,6 +438,7 @@ class FloeAgent:
         path: str,
         body: Any = None,
         extra_headers: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> tuple[int, dict[str, str], str]:
         url = f"{self._base_url}{path}"
         encoded_body = None
@@ -440,9 +452,10 @@ class FloeAgent:
         if extra_headers:
             headers.update(extra_headers)
 
+        effective_timeout = self._timeout_seconds if timeout is None else timeout
         req = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout_seconds) as resp:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 response_body = _decode_response(resp.read(), resp.headers)
                 response_headers = {k.lower(): v for k, v in resp.headers.items()}
                 return resp.status, response_headers, response_body
@@ -457,7 +470,7 @@ class FloeAgent:
             # "network error".
             if isinstance(e.reason, TimeoutError):
                 raise FloeAgentError(
-                    f"Request timed out after {self._timeout_seconds}s",
+                    f"Request timed out after {effective_timeout}s",
                     408,
                     "timeout",
                 ) from e
@@ -474,8 +487,14 @@ class FloeAgent:
                 f"Network error reaching {url}: {e}", 0, "network_error"
             ) from e
 
-    def _json_request(self, method: str, path: str, operation: str) -> dict[str, Any]:
-        status, _headers, body = self._request(method, path)
+    def _json_request(
+        self,
+        method: str,
+        path: str,
+        operation: str,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        status, _headers, body = self._request(method, path, timeout=timeout)
         if status >= 400:
             self._raise_from_response(status, body, operation)
         try:
