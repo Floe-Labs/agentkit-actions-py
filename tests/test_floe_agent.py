@@ -29,6 +29,7 @@ from floe_agentkit_actions import (
     FetchResult,
     FloeAgent,
     FloeAgentError,
+    ReservationStatus,
     TransactionsResult,
 )
 
@@ -198,11 +199,15 @@ def test_fetch_accepts_max_length_idempotency_key() -> None:
 
 
 def test_balance_returns_dollars_only() -> None:
+    # FLO-567: `available` is spendable USDC (= the legacy `balance` field
+    # on facilitator responses). Pre-FLO-567 this incorrectly returned
+    # `creditAvailable` (borrowing headroom), which is what the reporter hit.
     body = json.dumps(
         {
+            "balance": "4000000",            # $4.00 spendable
             "creditLimit": "10000000",       # $10
-            "creditUsed": "3200000",         # $3.20
-            "creditAvailable": "6800000",    # $6.80
+            "creditUsed": "4000000",         # $4
+            "creditAvailable": "6000000",    # $6 headroom (NOT spendable)
             "pendingSettlements": "200000",  # $0.20
             "activeLoans": [],
             "delegationActive": True,
@@ -211,15 +216,16 @@ def test_balance_returns_dollars_only() -> None:
     agent = FloeAgent(api_key="floe_test")
     with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
         avail = agent.balance()
-    assert avail == pytest.approx(6.80)
+    assert avail == pytest.approx(4.00)
 
 
 def test_balance_details_returns_full_shape() -> None:
     body = json.dumps(
         {
+            "balance": "4000000",
             "creditLimit": "10000000",
-            "creditUsed": "3200000",
-            "creditAvailable": "6800000",
+            "creditUsed": "4000000",
+            "creditAvailable": "6000000",
             "pendingSettlements": "200000",
             "activeLoans": [{"loanId": "42", "principalRaw": "5000000"}],
             "delegationActive": True,
@@ -229,7 +235,9 @@ def test_balance_details_returns_full_shape() -> None:
     with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
         detail = agent.balance_details()
     assert isinstance(detail, BalanceResult)
-    assert detail.available == pytest.approx(6.80)
+    assert detail.available == pytest.approx(4.00)
+    assert detail.credit_available == pytest.approx(6.00)
+    assert detail.wallet_usdc is None  # legacy payload has no walletUsdcRaw
     assert detail.pending == pytest.approx(0.20)
     assert detail.raw.credit_limit_raw == "10000000"
     assert detail.raw.active_loans == [{"loanId": "42", "principalRaw": "5000000"}]
@@ -326,6 +334,166 @@ def test_json_request_wraps_malformed_2xx_body() -> None:
             agent.balance()
     assert exc_info.value.code == "invalid_response_body"
     assert exc_info.value.status == 200
+
+
+# ── FLO-567: balance disambiguation + await_settlement ──────────────────
+
+
+def _sequenced_urlopen(responses: list[tuple[int, bytes]]):
+    """urlopen replacement that returns the next response in `responses` on each call."""
+    it = iter(responses)
+
+    def _urlopen(_req: Any, timeout: float = 0):  # noqa: ARG001
+        try:
+            status, body = next(it)
+        except StopIteration:
+            raise AssertionError("more urlopen calls than seeded responses")
+        return _StubResponse(status, body)
+
+    return _urlopen
+
+
+def test_balance_details_prefers_explicit_raw_fields() -> None:
+    # Facilitator on FLO-567 ships both legacy and explicit fields.
+    body = json.dumps(
+        {
+            "balance": "4000000",
+            "creditLimit": "10000000",
+            "creditUsed": "4000000",
+            "creditAvailable": "6000000",
+            "spendableRaw": "4000000",
+            "creditAvailableRaw": "6000000",
+            "walletUsdcRaw": "123456",
+            "pendingSettlementsRaw": "500000",
+            "heldUnspentRaw": "0",
+            "activeLoans": [],
+            "delegationActive": True,
+        }
+    ).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        detail = agent.balance_details()
+    assert detail.available == pytest.approx(4.0)
+    assert detail.credit_available == pytest.approx(6.0)
+    assert detail.wallet_usdc == pytest.approx(0.123456, rel=1e-5)
+    assert detail.pending == pytest.approx(0.5)
+    assert detail.raw.spendable_raw == "4000000"
+    assert detail.raw.wallet_usdc_raw == "123456"
+    assert detail.raw.held_unspent_raw == "0"
+
+
+def test_balance_exposes_spendable_vs_headroom_gap() -> None:
+    # The reporter's exact scenario: $5 of headroom, $0 spendable.
+    body = json.dumps(
+        {
+            "balance": "0",
+            "creditLimit": "5000000",
+            "creditUsed": "0",
+            "creditAvailable": "5000000",
+            "spendableRaw": "0",
+            "creditAvailableRaw": "5000000",
+            "walletUsdcRaw": None,
+            "pendingSettlementsRaw": "0",
+            "heldUnspentRaw": "0",
+            "activeLoans": [],
+            "delegationActive": True,
+        }
+    ).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        avail = agent.balance()
+    assert avail == 0.0
+
+
+def test_await_settlement_returns_immediately_when_terminal() -> None:
+    body = json.dumps({
+        "nonce": "n1", "state": "settled", "terminal": True,
+        "paymentAmountRaw": "1000000", "txHash": "0xabc",
+        "validBefore": 0, "reservedAt": None, "sentAt": None,
+        "settledAt": "2026-05-22T12:00:00Z",
+    }).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        status = agent.await_settlement("n1", interval_seconds=0.01, timeout_seconds=1.0)
+    assert isinstance(status, ReservationStatus)
+    assert status.state == "settled"
+    assert status.tx_hash == "0xabc"
+
+
+def test_await_settlement_polls_until_terminal() -> None:
+    pending = json.dumps({
+        "nonce": "n2", "state": "pending_settlement", "terminal": False,
+        "paymentAmountRaw": "1000000", "txHash": None, "validBefore": 0,
+        "reservedAt": None, "sentAt": None, "settledAt": None,
+    }).encode("utf-8")
+    settled = json.dumps({
+        "nonce": "n2", "state": "settled", "terminal": True,
+        "paymentAmountRaw": "1000000", "txHash": "0xdef", "validBefore": 0,
+        "reservedAt": None, "sentAt": None, "settledAt": "2026-05-22T12:00:01Z",
+    }).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    with patch(
+        "urllib.request.urlopen",
+        _sequenced_urlopen([(200, pending), (200, pending), (200, settled)]),
+    ):
+        status = agent.await_settlement("n2", interval_seconds=0.01, timeout_seconds=2.0)
+    assert status.state == "settled"
+    assert status.tx_hash == "0xdef"
+
+
+@pytest.mark.parametrize("terminal_state", ["settled", "payment_rejected", "expired_unsettled"])
+def test_await_settlement_propagates_each_terminal_state(terminal_state: str) -> None:
+    body = json.dumps({
+        "nonce": f"n-{terminal_state}", "state": terminal_state, "terminal": True,
+        "paymentAmountRaw": "1000000",
+        "txHash": "0xabc" if terminal_state == "settled" else None,
+        "validBefore": 0, "reservedAt": None, "sentAt": None,
+        "settledAt": "2026-05-22T12:00:00Z" if terminal_state == "settled" else None,
+    }).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        status = agent.await_settlement(
+            f"n-{terminal_state}", interval_seconds=0.01, timeout_seconds=1.0,
+        )
+    assert status.state == terminal_state
+    assert status.terminal is True
+
+
+def test_await_settlement_raises_408_on_timeout() -> None:
+    pending = json.dumps({
+        "nonce": "n3", "state": "pending_settlement", "terminal": False,
+        "paymentAmountRaw": "1000000", "txHash": None, "validBefore": 0,
+        "reservedAt": None, "sentAt": None, "settledAt": None,
+    }).encode("utf-8")
+    agent = FloeAgent(api_key="floe_test")
+    # 30+ pending responses; the helper times out before exhausting them.
+    seq = [(200, pending) for _ in range(30)]
+    with patch("urllib.request.urlopen", _sequenced_urlopen(seq)):
+        with pytest.raises(FloeAgentError) as exc_info:
+            agent.await_settlement("n3", interval_seconds=0.01, timeout_seconds=0.04)
+    assert exc_info.value.status == 408
+    assert exc_info.value.code == "await_settlement_timeout"
+
+
+def test_fetch_attaches_parsed_502_body_with_reservation_nonce() -> None:
+    # The 502 ambiguous response carries reservation.nonce so callers can
+    # hand it to await_settlement instead of retrying.
+    err_body = json.dumps({
+        "error": "upstream_paid_request_failed_ambiguous",
+        "detail": "EHOSTUNREACH",
+        "reservation": {"nonce": "n-bubble-1", "validBefore": 1_700_000_000},
+    }).encode("utf-8")
+    err = _build_http_error(status=502, body=err_body, content_type="application/json")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(FloeAgentError) as exc_info:
+            agent.fetch(url="https://upstream.example/paid")
+    assert exc_info.value.status == 502
+    assert exc_info.value.code == "upstream_paid_request_failed_ambiguous"
+    # detail is the parsed JSON; reservation.nonce is reachable.
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail["reservation"]["nonce"] == "n-bubble-1"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
