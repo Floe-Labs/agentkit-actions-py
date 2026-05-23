@@ -187,6 +187,23 @@ class X402GetBalanceSchema(BaseModel):
     pass
 
 
+class X402AwaitSettlementSchema(BaseModel):
+    nonce: str = Field(
+        ...,
+        description=(
+            "Reservation nonce returned in the 502 body when x402_fetch failed with "
+            "`upstream_paid_request_failed_ambiguous`. The settlement helper polls "
+            "until the reservation reaches a terminal state (settled | "
+            "payment_rejected | expired_unsettled)."
+        ),
+    )
+    interval_seconds: float = Field(default=2.0, gt=0, le=60, description="Polling interval in seconds.")
+    timeout_seconds: float = Field(
+        default=900.0, gt=0, le=3600,
+        description="Maximum time to wait in seconds before giving up (default 900 = 15 min).",
+    )
+
+
 class X402GetTransactionsSchema(BaseModel):
     limit: str = Field(default="20", description="Number of transactions to return")
 
@@ -291,7 +308,13 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def supports_network(self, network: Network) -> bool:
         return network.chain_id in ("8453", "84532")
 
-    def _facilitator_fetch(self, path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
+    def _facilitator_fetch(
+        self,
+        path: str,
+        method: str = "GET",
+        body: Any = None,
+        timeout_seconds: float = 30,
+    ) -> dict[str, Any]:
         import urllib.error
         import urllib.request
 
@@ -310,7 +333,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         data = json.dumps(body).encode() if body else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                 return {
                     "status": resp.status,
                     "body": json.loads(resp.read()),
@@ -719,6 +742,22 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             if resp["status"] >= 400:
                 error = resp["body"].get("error", "Unknown error")
+                # FLO-567: surface the reservation nonce on ambiguous 502s
+                # so the LLM can call x402_await_settlement instead of
+                # retrying (which may double-charge).
+                if error == "upstream_paid_request_failed_ambiguous":
+                    reservation = resp["body"].get("reservation") or {}
+                    nonce = reservation.get("nonce")
+                    if nonce:
+                        detail = resp["body"].get("detail")
+                        msg = (
+                            "Payment is in-flight but the upstream response is ambiguous (HTTP 502). "
+                            "DO NOT retry — that may double-charge. Use `x402_await_settlement` with "
+                            f"this nonce to resolve:\n**nonce**: `{nonce}`"
+                        )
+                        if detail:
+                            msg += f"\n\n_Detail: {detail}_"
+                        return msg
                 error_map = {
                     "funding_in_progress": "⏳ Funding in progress — retry in 30 seconds.",
                     "credit_frozen": "❄️ Credit frozen — collateral health ratio too low.",
@@ -741,7 +780,11 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
     @create_action(
         name="x402_get_balance",
-        description="Check your x402 credit status — available credit, active loans, and health ratio.",
+        description=(
+            "Check your x402 credit status: spendable USDC (what you can pay with right now), "
+            "borrowing headroom (how much more you could draw from your credit line), "
+            "on-chain wallet USDC, active loans, and delegation state."
+        ),
         schema=X402GetBalanceSchema,
     )
     def x402_get_balance(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
@@ -752,16 +795,126 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             data = resp["body"]
             usdc_decimals = 6
-            return "\n".join([
+            # FLO-567: prefer explicit *Raw fields; fall back to legacy.
+            # Mirror the fallback chain in FloeAgent.balance_details() — an
+            # older facilitator returns `pendingSettlements` (no -Raw suffix),
+            # and without the fallback the action silently hides the
+            # in-flight warning even when funds are reserved.
+            spendable_raw = data.get("spendableRaw") or data.get("balance") or "0"
+            credit_available_raw = data.get("creditAvailableRaw") or data.get("creditAvailable", "0")
+            pending_raw = data.get("pendingSettlementsRaw") or data.get("pendingSettlements") or "0"
+            wallet_usdc_raw = data.get("walletUsdcRaw")
+
+            def fmt(raw):
+                return format_token_amount(int(raw or "0"), usdc_decimals, "USDC")
+
+            lines = [
                 "## x402 Credit Status\n",
-                f"**Credit Limit**: {format_token_amount(int(data.get('creditLimit', '0')), usdc_decimals, 'USDC')}",
-                f"**Credit Used**: {format_token_amount(int(data.get('creditUsed', '0')), usdc_decimals, 'USDC')}",
-                f"**Credit Available**: {format_token_amount(int(data.get('creditAvailable', '0')), usdc_decimals, 'USDC')}",
+                f"**Spendable now**: {fmt(spendable_raw)} — what you can pay with right now.",
+                f"**Borrowing headroom**: {fmt(credit_available_raw)} — how much more you could draw from your credit line.",
+            ]
+            if wallet_usdc_raw is not None:
+                lines.append(f"**Wallet USDC (on-chain)**: {fmt(wallet_usdc_raw)}")
+            lines.extend([
+                f"**Credit Limit**: {fmt(data.get('creditLimit', '0'))}",
+                f"**Credit Used**: {fmt(data.get('creditUsed', '0'))}",
+            ])
+            if pending_raw and pending_raw != "0":
+                lines.append(
+                    f"**Pending settlement**: {fmt(pending_raw)} — use `x402_await_settlement` to resolve."
+                )
+            lines.extend([
                 f"**Active Loans**: {len(data.get('activeLoans', []))}",
                 f"**Delegation Active**: {'Yes' if data.get('delegationActive') else 'No'}",
             ])
+            return "\n".join(lines)
         except Exception as e:
             return f"Error fetching balance: {e}"
+
+    # ── x402_await_settlement ──────────────────────────────────────────────
+    #
+    # FLO-567: companion to x402_fetch's 502 ambiguous error. Polls until
+    # the reservation reaches a terminal state.
+
+    @create_action(
+        name="x402_await_settlement",
+        description=(
+            "Poll the facilitator until a pending x402 reservation reaches a terminal "
+            "state. Use this AFTER an x402_fetch call returned a 502 ambiguous error "
+            "with a nonce — do NOT retry the original call (that may double-charge). "
+            "Resolves with the final state: settled (paid on-chain), payment_rejected "
+            "(credit released), or expired_unsettled (authorization expired)."
+        ),
+        schema=X402AwaitSettlementSchema,
+    )
+    def x402_await_settlement(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        import time as _time
+        from urllib.parse import quote as _quote
+
+        nonce = args["nonce"]
+        # Honor the caller's requested timeout even when smaller than the
+        # polling interval — the per-iteration min(interval, remaining)
+        # already caps each sleep so we never overshoot the deadline.
+        interval_seconds = max(0.1, float(args.get("interval_seconds", 2.0)))
+        timeout_seconds = max(0.1, float(args.get("timeout_seconds", 900.0)))
+
+        deadline = _time.monotonic() + timeout_seconds
+        path = f"/agents/reservations/{_quote(nonce, safe='')}"
+        last_state: Optional[str] = None
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return (
+                    f"Timed out after {timeout_seconds}s waiting for reservation `{nonce}` to settle "
+                    f"(last state: `{last_state}`). Call this action again to resume waiting."
+                )
+            per_call_timeout = max(0.1, min(remaining, 30))
+            try:
+                resp = self._facilitator_fetch(path, timeout_seconds=per_call_timeout)
+            except Exception as e:
+                return f"Error polling reservation `{nonce}`: {e}. Call this action again to resume waiting."
+            if resp["status"] == 404:
+                return (
+                    f"Reservation `{nonce}` not found. Verify the nonce belongs to this "
+                    "agent and was issued recently."
+                )
+            if resp["status"] >= 400:
+                return f"Error polling reservation: {resp['body'].get('error', 'Unknown')}"
+
+            data = resp["body"]
+            last_state = data.get("state", last_state)
+            if data.get("terminal"):
+                usdc_decimals = 6
+                # State-aware heading so payment_rejected / expired_unsettled
+                # don't read as successful settlements to the LLM.
+                state = data.get("state")
+                if state == "settled":
+                    heading = "## Reservation settled"
+                elif state == "payment_rejected":
+                    heading = "## Reservation rejected (credit released)"
+                elif state == "expired_unsettled":
+                    heading = "## Reservation expired (may or may not have charged upstream)"
+                else:
+                    heading = f"## Reservation {state}"
+                lines = [
+                    f"{heading}\n",
+                    f"**State**: `{state}`",
+                    f"**Nonce**: `{data.get('nonce')}`",
+                    f"**Amount**: {format_token_amount(int(data.get('paymentAmountRaw', '0')), usdc_decimals, 'USDC')}",
+                ]
+                if data.get("txHash"):
+                    lines.append(f"**Tx**: `{data['txHash']}`")
+                if data.get("settledAt"):
+                    lines.append(f"**Settled at**: {data['settledAt']}")
+                return "\n".join(lines)
+
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return (
+                    f"Timed out after {timeout_seconds}s waiting for reservation `{nonce}` to settle "
+                    f"(last state: `{data.get('state')}`). Call this action again to resume waiting."
+                )
+            _time.sleep(min(interval_seconds, remaining))
 
     # ── x402_get_transactions ──────────────────────────────────────────────
 

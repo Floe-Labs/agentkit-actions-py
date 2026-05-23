@@ -16,6 +16,7 @@ from .floe_agent import (
     FloeAgent,
     FloeAgentError,
     RawBalance,
+    ReservationStatus,
     TransactionsResult,
     X402FetchResult,  # deprecated alias for FetchResult
 )
@@ -40,6 +41,6 @@ __all__ = [
     "X402ActionProvider", "X402Config", "x402_action_provider",
     # High-level runtime client (no wallet, no chain knowledge — `floe_*` key only).
     "FloeAgent", "FloeAgentError",
-    "FetchResult", "BalanceResult", "RawBalance", "TransactionsResult",
+    "FetchResult", "BalanceResult", "RawBalance", "ReservationStatus", "TransactionsResult",
     "X402FetchResult",  # deprecated alias for FetchResult
 ]

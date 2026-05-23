@@ -102,6 +102,14 @@ class RawBalance:
     credit_used_raw: str
     credit_available_raw: str
     pending_settlements_raw: str
+    # FLO-567: explicit field names that disambiguate spendable USDC
+    # (what the proxy gates on) from borrowing headroom (what the agent
+    # could draw). ``wallet_usdc_raw`` is the on-chain USDC balance of
+    # the Privy custodial wallet — ``None`` when the facilitator could
+    # not read it or the field is absent (older facilitator).
+    spendable_raw: str = "0"
+    wallet_usdc_raw: Optional[str] = None
+    held_unspent_raw: str = "0"
     active_loans: list[dict[str, Any]] = field(default_factory=list)
     delegation_active: bool = False
 
@@ -109,11 +117,36 @@ class RawBalance:
 @dataclass
 class BalanceResult:
     available: float
-    """Dollar amount available to spend right now."""
+    """Dollar amount the agent can actually spend right now (backed by
+    ``spendable_raw``). NOT the same as ``credit_available`` — an agent
+    with a $100 delegation but no facility loan opened has ``available == 0``.
+    """
+    credit_available: float
+    """Dollar amount of operator-delegation headroom (backed by
+    ``credit_available_raw``) — how much more the agent could borrow."""
+    wallet_usdc: Optional[float]
+    """On-chain USDC balance of the Privy custodial wallet, or ``None`` when
+    the facilitator could not read it."""
     pending: float
     """Dollar amount currently reserved against in-flight payments."""
     raw: RawBalance
     """Raw integer-string fields for advanced callers."""
+
+
+# FLO-567 reservation-status return type for ``await_settlement``.
+@dataclass
+class ReservationStatus:
+    nonce: str
+    state: str
+    """One of: reserved | sent | pending_settlement | settled |
+    expired_unsettled | payment_rejected."""
+    terminal: bool
+    payment_amount_raw: str
+    tx_hash: Optional[str]
+    valid_before: int
+    reserved_at: Optional[str]
+    sent_at: Optional[str]
+    settled_at: Optional[str]
 
 
 @dataclass
@@ -249,17 +282,42 @@ class FloeAgent:
         return self.balance_details().available
 
     def balance_details(self) -> BalanceResult:
-        """Full balance breakdown including pending settlements and raw values."""
+        """Full balance breakdown including pending settlements and raw values.
+
+        FLO-567: ``available`` now reads ``spendableRaw`` (what the proxy
+        gates on), falling back to the legacy ``balance`` field for older
+        facilitators. ``credit_available`` is exposed separately as
+        borrowing headroom.
+        """
         data = self._json_request("GET", "/v1/agents/balance", operation="balance")
-        pending_raw = data.get("pendingSettlements", "0")
+        # Prefer FLO-567 explicit names; fall back to legacy. `or` is
+        # deliberate (not Pythonic `if x is not None else …`): the only
+        # legitimate falsy value the server emits is the string "0", which
+        # is truthy in Python, so `"0" or fallback` correctly yields "0".
+        # An empty string would (incorrectly) fall through — but the API
+        # never returns one, so the simpler form stays safe.
+        spendable_raw = data.get("spendableRaw") or data.get("balance") or "0"
+        credit_available_raw = data.get("creditAvailableRaw") or data["creditAvailable"]
+        pending_raw = (
+            data.get("pendingSettlementsRaw") or data.get("pendingSettlements") or "0"
+        )
+        held_raw = data.get("heldUnspentRaw") or "0"
+        wallet_usdc_raw = data.get("walletUsdcRaw")  # may be None or absent
         return BalanceResult(
-            available=_raw_to_dollars(data["creditAvailable"]),
+            available=_raw_to_dollars(spendable_raw),
+            credit_available=_raw_to_dollars(credit_available_raw),
+            wallet_usdc=(
+                _raw_to_dollars(wallet_usdc_raw) if wallet_usdc_raw is not None else None
+            ),
             pending=_raw_to_dollars(pending_raw),
             raw=RawBalance(
                 credit_limit_raw=data["creditLimit"],
                 credit_used_raw=data["creditUsed"],
-                credit_available_raw=data["creditAvailable"],
+                credit_available_raw=credit_available_raw,
                 pending_settlements_raw=pending_raw,
+                spendable_raw=spendable_raw,
+                wallet_usdc_raw=wallet_usdc_raw,
+                held_unspent_raw=held_raw,
                 active_loans=data.get("activeLoans", []),
                 delegation_active=data.get("delegationActive", False),
             ),
@@ -267,6 +325,72 @@ class FloeAgent:
 
     # Backwards compatibility alias.
     get_balance = balance_details
+
+    def await_settlement(
+        self,
+        nonce: str,
+        interval_seconds: float = 2.0,
+        timeout_seconds: float = 15 * 60.0,
+    ) -> ReservationStatus:
+        """Poll until an x402 reservation reaches a terminal state.
+
+        Use this after ``fetch`` raises ``FloeAgentError`` with code
+        ``"upstream_paid_request_failed_ambiguous"`` — the raised error's
+        ``detail["reservation"]["nonce"]`` is what to pass in here. Do NOT
+        retry the original ``fetch`` call; it may double-charge.
+
+        Resolves with the final ``ReservationStatus`` once ``state`` is one of
+        ``settled``, ``payment_rejected``, or ``expired_unsettled``. Raises
+        ``FloeAgentError`` with status 408 on timeout, or 404 if the nonce is
+        not owned by this agent.
+        """
+        import time as _time
+        from urllib.parse import quote as _quote
+
+        if interval_seconds <= 0:
+            raise ValueError("await_settlement: interval_seconds must be > 0")
+        if timeout_seconds <= 0:
+            raise ValueError("await_settlement: timeout_seconds must be > 0")
+
+        deadline = _time.monotonic() + timeout_seconds
+        path = f"/v1/agents/reservations/{_quote(nonce, safe='')}"
+        last_state: Optional[str] = None
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FloeAgentError(
+                    f"await_settlement: timed out after {timeout_seconds}s "
+                    f"(last state: {last_state})",
+                    408,
+                    "await_settlement_timeout",
+                )
+            per_call_timeout = min(self._timeout_seconds, remaining)
+            data = self._json_request(
+                "GET", path, operation="await_settlement", timeout=per_call_timeout
+            )
+            last_state = data.get("state")
+            if data.get("terminal"):
+                return ReservationStatus(
+                    nonce=data["nonce"],
+                    state=data["state"],
+                    terminal=True,
+                    payment_amount_raw=data.get("paymentAmountRaw", "0"),
+                    tx_hash=data.get("txHash"),
+                    valid_before=int(data.get("validBefore", 0)),
+                    reserved_at=data.get("reservedAt"),
+                    sent_at=data.get("sentAt"),
+                    settled_at=data.get("settledAt"),
+                )
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FloeAgentError(
+                    f"await_settlement: timed out after {timeout_seconds}s "
+                    f"(last state: {last_state})",
+                    408,
+                    "await_settlement_timeout",
+                    data,
+                )
+            _time.sleep(min(interval_seconds, remaining))
 
     def get_transactions(
         self,
@@ -314,6 +438,7 @@ class FloeAgent:
         path: str,
         body: Any = None,
         extra_headers: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> tuple[int, dict[str, str], str]:
         url = f"{self._base_url}{path}"
         encoded_body = None
@@ -327,9 +452,10 @@ class FloeAgent:
         if extra_headers:
             headers.update(extra_headers)
 
+        effective_timeout = self._timeout_seconds if timeout is None else timeout
         req = urllib.request.Request(url, data=encoded_body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout_seconds) as resp:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 response_body = _decode_response(resp.read(), resp.headers)
                 response_headers = {k.lower(): v for k, v in resp.headers.items()}
                 return resp.status, response_headers, response_body
@@ -344,7 +470,7 @@ class FloeAgent:
             # "network error".
             if isinstance(e.reason, TimeoutError):
                 raise FloeAgentError(
-                    f"Request timed out after {self._timeout_seconds}s",
+                    f"Request timed out after {effective_timeout}s",
                     408,
                     "timeout",
                 ) from e
@@ -361,8 +487,14 @@ class FloeAgent:
                 f"Network error reaching {url}: {e}", 0, "network_error"
             ) from e
 
-    def _json_request(self, method: str, path: str, operation: str) -> dict[str, Any]:
-        status, _headers, body = self._request(method, path)
+    def _json_request(
+        self,
+        method: str,
+        path: str,
+        operation: str,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        status, _headers, body = self._request(method, path, timeout=timeout)
         if status >= 400:
             self._raise_from_response(status, body, operation)
         try:
