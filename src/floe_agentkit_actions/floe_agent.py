@@ -227,8 +227,6 @@ class FloeAgent:
         headers: Optional[dict[str, str]] = None,
         body: Optional[str] = None,
         idempotency_key: Optional[str] = None,
-        *,
-        _auto_borrow_retries: int = 0,
     ) -> FetchResult:
         """Call any URL.
 
@@ -248,33 +246,37 @@ class FloeAgent:
                 )
             extra["Idempotency-Key"] = idempotency_key
 
-        payload: dict = {"url": url, "method": method}
+        payload: dict[str, Any] = {"url": url, "method": method}
         if headers is not None:
             payload["headers"] = headers
         if body is not None:
             payload["body"] = body
 
-        status, response_headers, raw_body = self._request(
-            "POST",
-            "/v1/proxy/fetch",
-            body=payload,
-            extra_headers=extra,
-        )
+        max_auto_borrow_retries = 2
+        for attempt in range(max_auto_borrow_retries + 1):
+            status, response_headers, raw_body = self._request(
+                "POST",
+                "/v1/proxy/fetch",
+                body=payload,
+                extra_headers=extra,
+            )
 
-        # Auto-borrow retry: server is topping up the credit line. Wait
-        # and retry up to 2 times before giving up.
-        if status == 402 and _auto_borrow_retries < 2:
-            try:
-                err_body = json.loads(raw_body)
-                if err_body.get("error") == "auto_borrow_in_progress":
-                    delay = err_body.get("retry_after_seconds", 10)
-                    time.sleep(delay)
-                    return self.fetch(
-                        url, method, headers, body, idempotency_key,
-                        _auto_borrow_retries=_auto_borrow_retries + 1,
-                    )
-            except (ValueError, KeyError):
-                pass
+            # Auto-borrow retry: server is topping up the credit line.
+            # Wait and retry before giving up.
+            if status == 402 and attempt < max_auto_borrow_retries:
+                try:
+                    err_body = json.loads(raw_body)
+                    if (
+                        isinstance(err_body, dict)
+                        and err_body.get("error") == "auto_borrow_in_progress"
+                    ):
+                        raw_delay = err_body.get("retry_after_seconds", 10)
+                        delay = min(max(float(raw_delay), 1), 60)
+                        time.sleep(delay)
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            break
 
         if status >= 400:
             self._raise_from_response(status, raw_body, "fetch")

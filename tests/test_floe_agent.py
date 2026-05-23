@@ -510,3 +510,132 @@ def _build_http_error(*, status: int, body: bytes, content_type: str):
         hdrs=_msg({"Content-Type": content_type}),
         fp=io.BytesIO(body),
     )
+
+
+# ── fetch() omits None headers/body ────────────────────────────────────
+
+
+def test_fetch_omits_none_headers_and_body() -> None:
+    """fetch(url) must NOT send headers:null or body:null in the JSON payload."""
+    captured: list[Any] = []
+    original_urlopen = None
+
+    def _capturing_urlopen(req: Any, timeout: float = 0):  # noqa: ARG001
+        captured.append(json.loads(req.data))
+        return _StubResponse(200, b'{"ok":true}')
+
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _capturing_urlopen):
+        agent.fetch("https://api.example.com/data")
+
+    assert len(captured) == 1
+    payload = captured[0]
+    assert "headers" not in payload
+    assert "body" not in payload
+    assert payload["url"] == "https://api.example.com/data"
+    assert payload["method"] == "GET"
+
+
+def test_fetch_includes_headers_and_body_when_provided() -> None:
+    captured: list[Any] = []
+
+    def _capturing_urlopen(req: Any, timeout: float = 0):  # noqa: ARG001
+        captured.append(json.loads(req.data))
+        return _StubResponse(200, b'{"ok":true}')
+
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _capturing_urlopen):
+        agent.fetch("https://api.example.com/data", method="POST",
+                     headers={"X-Custom": "val"}, body='{"q":"hi"}')
+
+    payload = captured[0]
+    assert payload["headers"] == {"X-Custom": "val"}
+    assert payload["body"] == '{"q":"hi"}'
+
+
+# ── fetch() auto-borrow retry ──────────────────────────────────────────
+
+
+def test_fetch_retries_on_auto_borrow_in_progress() -> None:
+    """402 auto_borrow_in_progress triggers retry; success on 2nd attempt."""
+    import urllib.error
+
+    call_count = 0
+
+    def _sequence_urlopen(req: Any, timeout: float = 0):  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise urllib.error.HTTPError(
+                url="https://api.example.com/data",
+                code=402,
+                msg="Payment Required",
+                hdrs=_msg({"Content-Type": "application/json"}),
+                fp=io.BytesIO(json.dumps({
+                    "error": "auto_borrow_in_progress",
+                    "retry_after_seconds": 0.01,
+                }).encode()),
+            )
+        return _StubResponse(200, b'{"ok":true}',
+                              {"Content-Type": "application/json", "X-Floe-Cost-USDC": "1000"})
+
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _sequence_urlopen), \
+         patch("time.sleep") as mock_sleep:
+        result = agent.fetch("https://api.example.com/data")
+
+    assert call_count == 2
+    assert result.status == 200
+    mock_sleep.assert_called_once()
+
+
+def test_fetch_gives_up_after_max_retries() -> None:
+    """After 2 auto_borrow retries, the 3rd 402 raises FloeAgentError."""
+    import urllib.error
+
+    def _always_402(req: Any, timeout: float = 0):  # noqa: ARG001
+        raise urllib.error.HTTPError(
+            url="https://api.example.com/data",
+            code=402,
+            msg="Payment Required",
+            hdrs=_msg({"Content-Type": "application/json"}),
+            fp=io.BytesIO(json.dumps({
+                "error": "auto_borrow_in_progress",
+                "retry_after_seconds": 0.01,
+            }).encode()),
+        )
+
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _always_402), \
+         patch("time.sleep"):
+        with pytest.raises(FloeAgentError) as exc_info:
+            agent.fetch("https://api.example.com/data")
+    assert exc_info.value.status == 402
+
+
+def test_fetch_no_retry_on_regular_402() -> None:
+    """A non-auto_borrow 402 must NOT trigger retry."""
+    import urllib.error
+
+    call_count = 0
+
+    def _regular_402(req: Any, timeout: float = 0):  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        raise urllib.error.HTTPError(
+            url="https://api.example.com/data",
+            code=402,
+            msg="Payment Required",
+            hdrs=_msg({"Content-Type": "application/json"}),
+            fp=io.BytesIO(json.dumps({
+                "error": "insufficient_balance",
+                "available": "0",
+                "required": "1000",
+            }).encode()),
+        )
+
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _regular_402):
+        with pytest.raises(FloeAgentError):
+            agent.fetch("https://api.example.com/data")
+    assert call_count == 1
