@@ -767,10 +767,26 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
             body_text = json.dumps(resp["body"], indent=2) if isinstance(resp["body"], dict) else str(resp["body"])
             payment_tx = resp["headers"].get("payment-response") or resp["headers"].get("x-payment-response")
+            # FLO-552: surface the dollar amount paid. Prefer the decimal alias
+            # X-Floe-Payment-Amount; fall back to formatting the raw-units
+            # X-Floe-Cost-USDC so older facilitators still show an amount.
+            paid_amount = resp["headers"].get("x-floe-payment-amount")
+            if paid_amount is None:
+                cost_raw = resp["headers"].get("x-floe-cost-usdc")
+                if cost_raw is not None:
+                    try:
+                        paid_amount = f"{int(cost_raw) / 1_000_000:.6f}"
+                    except ValueError:
+                        paid_amount = None
 
             lines = ["## Response\n"]
-            if payment_tx:
-                lines.append(f"*Paid via x402 — tx: {payment_tx}*\n")
+            if payment_tx or paid_amount:
+                parts = []
+                if paid_amount:
+                    parts.append(f"${paid_amount} USDC")
+                if payment_tx:
+                    parts.append(f"tx: {payment_tx}")
+                lines.append(f"*Paid via x402 — {' — '.join(parts)}*\n")
             lines.extend(["```", body_text[:4000], "```"])
             return "\n".join(lines)
         except Exception as e:
