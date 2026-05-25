@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -245,12 +246,37 @@ class FloeAgent:
                 )
             extra["Idempotency-Key"] = idempotency_key
 
-        status, response_headers, raw_body = self._request(
-            "POST",
-            "/v1/proxy/fetch",
-            body={"url": url, "method": method, "headers": headers, "body": body},
-            extra_headers=extra,
-        )
+        payload: dict[str, Any] = {"url": url, "method": method}
+        if headers is not None:
+            payload["headers"] = headers
+        if body is not None:
+            payload["body"] = body
+
+        max_auto_borrow_retries = 2
+        for attempt in range(max_auto_borrow_retries + 1):
+            status, response_headers, raw_body = self._request(
+                "POST",
+                "/v1/proxy/fetch",
+                body=payload,
+                extra_headers=extra,
+            )
+
+            # Auto-borrow retry: server is topping up the credit line.
+            # Wait and retry before giving up.
+            if status == 402 and attempt < max_auto_borrow_retries:
+                try:
+                    err_body = json.loads(raw_body)
+                    if (
+                        isinstance(err_body, dict)
+                        and err_body.get("error") == "auto_borrow_in_progress"
+                    ):
+                        raw_delay = err_body.get("retry_after_seconds", 10)
+                        delay = min(max(float(raw_delay), 1), 60)
+                        time.sleep(delay)
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            break
 
         if status >= 400:
             self._raise_from_response(status, raw_body, "fetch")
