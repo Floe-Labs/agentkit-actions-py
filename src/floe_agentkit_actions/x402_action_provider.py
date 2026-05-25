@@ -775,7 +775,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 cost_raw = resp["headers"].get("x-floe-cost-usdc")
                 if cost_raw is not None:
                     try:
-                        paid_amount = f"{int(cost_raw) / 1_000_000:.6f}"
+                        paid_amount = f"{(Decimal(int(cost_raw)) / Decimal(1_000_000)):.6f}"
                     except ValueError:
                         paid_amount = None
 
