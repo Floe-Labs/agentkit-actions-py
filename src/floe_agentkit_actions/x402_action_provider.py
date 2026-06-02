@@ -762,6 +762,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                     "funding_in_progress": "⏳ Funding in progress — retry in 30 seconds.",
                     "credit_frozen": "❄️ Credit frozen — collateral health ratio too low.",
                     "insufficient_balance": "💸 Insufficient credit — credit line fully utilized.",
+                    "account_closed": "🚫 Account closed — no further payments.",
                 }
                 return error_map.get(error, f"Facilitator error: {error}")
 
@@ -820,6 +821,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             credit_available_raw = data.get("creditAvailableRaw") or data.get("creditAvailable", "0")
             pending_raw = data.get("pendingSettlementsRaw") or data.get("pendingSettlements") or "0"
             wallet_usdc_raw = data.get("walletUsdcRaw")
+            held_unspent_raw = data.get("heldUnspentRaw")
 
             def fmt(raw):
                 return format_token_amount(int(raw or "0"), usdc_decimals, "USDC")
@@ -831,6 +833,8 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             ]
             if wallet_usdc_raw is not None:
                 lines.append(f"**Wallet USDC (on-chain)**: {fmt(wallet_usdc_raw)}")
+            if held_unspent_raw and held_unspent_raw != "0":
+                lines.append(f"**Held unspent**: {fmt(held_unspent_raw)} — reserved but not yet settled.")
             lines.extend([
                 f"**Credit Limit**: {fmt(data.get('creditLimit', '0'))}",
                 f"**Credit Used**: {fmt(data.get('creditUsed', '0'))}",
