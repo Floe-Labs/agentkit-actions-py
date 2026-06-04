@@ -36,7 +36,7 @@ class NoopWallet:
 def _provider_with_headers(headers: dict[str, str]) -> X402ActionProvider:
     provider = X402ActionProvider(X402Config(
         matcher_address="0x17946cD3e180f82e632805e5549EC913330Bb175",
-        facilitator_url="https://x402.floe.xyz",
+        facilitator_url="https://credit-api.floelabs.xyz",
     ))
 
     def _spy(path: str, method: str = "GET", body: Any = None) -> dict[str, Any]:

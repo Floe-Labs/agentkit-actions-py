@@ -443,13 +443,16 @@ class FloeAgent:
         Returns ``{"cost": float, "can_afford": bool, "is_paid": bool}``.
         Cheap, idempotent, doesn't reserve balance.
         """
-        from urllib.parse import urlencode
-
-        path = f"/v1/x402/estimate?{urlencode({'url': url, 'method': method})}"
-        raw = self._json_request("GET", path, operation="estimate_cost")
+        raw = self._json_request(
+            "POST",
+            "/v1/x402/estimate",
+            operation="estimate_cost",
+            body={"url": url, "method": method},
+        )
+        reflection = raw.get("reflection") or {}
         return {
-            "cost": _raw_to_dollars(raw.get("costRaw")),
-            "can_afford": not raw.get("willExceedAvailable", False),
+            "cost": _raw_to_dollars(raw.get("priceRaw")),
+            "can_afford": not reflection.get("willExceedAvailable", False),
             "is_paid": bool(raw.get("x402", False)),
         }
 
@@ -518,19 +521,20 @@ class FloeAgent:
         method: str,
         path: str,
         operation: str,
+        body: Any = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
-        status, _headers, body = self._request(method, path, timeout=timeout)
+        status, _headers, raw = self._request(method, path, body=body, timeout=timeout)
         if status >= 400:
-            self._raise_from_response(status, body, operation)
+            self._raise_from_response(status, raw, operation)
         try:
-            return json.loads(body)
+            return json.loads(raw)
         except (json.JSONDecodeError, ValueError) as e:
             raise FloeAgentError(
                 f"{operation} returned {status} but the body was not valid JSON.",
                 status,
                 "invalid_response_body",
-                body,
+                raw,
             ) from e
 
     @staticmethod
