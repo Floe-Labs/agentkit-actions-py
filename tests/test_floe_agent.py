@@ -278,7 +278,7 @@ def test_get_transactions_returns_typed_result() -> None:
 
 def test_estimate_cost_returns_dollars() -> None:
     body = json.dumps(
-        {"costRaw": "10000", "willExceedAvailable": False, "x402": True}
+        {"priceRaw": "10000", "reflection": {"willExceedAvailable": False}, "x402": True}
     ).encode("utf-8")
     agent = FloeAgent(api_key="floe_test")
     with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
@@ -639,3 +639,60 @@ def test_fetch_no_retry_on_regular_402() -> None:
         with pytest.raises(FloeAgentError):
             agent.fetch("https://api.example.com/data")
     assert call_count == 1
+
+
+# ── estimate_cost ──────────────────────────────────────────────────────────
+# Regression: estimate_cost previously issued GET /v1/x402/estimate and read
+# top-level costRaw / willExceedAvailable. The server is POST-only and returns
+# priceRaw + nested reflection.willExceedAvailable. These lock the real contract.
+
+
+def _capture_urlopen(*, status: int, body: bytes, sink: dict[str, Any]):
+    def _urlopen(req: Any, timeout: float = 0):  # noqa: ARG001
+        sink["method"] = req.get_method()
+        sink["url"] = req.full_url
+        sink["data"] = req.data
+        return _StubResponse(status, body)
+
+    return _urlopen
+
+
+def test_estimate_cost_posts_and_maps_real_response_shape() -> None:
+    sink: dict[str, Any] = {}
+    body = json.dumps({
+        "x402": True,
+        "priceRaw": "1500000",  # 1.5 USDC
+        "reflection": {"willExceedAvailable": False},
+    }).encode()
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _capture_urlopen(status=200, body=body, sink=sink)):
+        out = agent.estimate_cost("https://api.vendor.test/data", "GET")
+
+    assert sink["method"] == "POST"
+    assert sink["url"].endswith("/v1/x402/estimate")
+    assert json.loads(sink["data"]) == {"url": "https://api.vendor.test/data", "method": "GET"}
+    assert out["cost"] == pytest.approx(1.5)
+    assert out["can_afford"] is True
+    assert out["is_paid"] is True
+
+
+def test_estimate_cost_can_afford_false_when_reflection_exceeds() -> None:
+    body = json.dumps({
+        "x402": True,
+        "priceRaw": "9000000",
+        "reflection": {"willExceedAvailable": True},
+    }).encode()
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        out = agent.estimate_cost("https://api.vendor.test/data")
+    assert out["can_afford"] is False
+
+
+def test_estimate_cost_non_x402_is_free_and_affordable() -> None:
+    body = json.dumps({"x402": False}).encode()
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", _make_urlopen(status=200, body=body)):
+        out = agent.estimate_cost("https://example.com")
+    assert out["is_paid"] is False
+    assert out["cost"] == 0
+    assert out["can_afford"] is True

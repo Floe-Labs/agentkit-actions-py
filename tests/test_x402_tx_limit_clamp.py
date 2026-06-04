@@ -40,7 +40,7 @@ class NoopWallet:
 def _make_provider() -> X402ActionProvider:
     return X402ActionProvider(X402Config(
         matcher_address="0x17946cD3e180f82e632805e5549EC913330Bb175",
-        facilitator_url="https://x402.floe.xyz",
+        facilitator_url="https://credit-api.floelabs.xyz",
     ))
 
 

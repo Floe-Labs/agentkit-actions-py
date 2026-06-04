@@ -167,7 +167,7 @@ def run() -> None:
         facilitator_url = (
             _parse_flag(rest, "facilitator-url")
             or os.environ.get("FLOE_FACILITATOR_URL")
-            or "https://x402.floe.xyz"
+            or "https://credit-api.floelabs.xyz"
         )
         run_register_command(
             RegisterArgs(
@@ -205,7 +205,7 @@ def run() -> None:
             (agent or {}).get("facilitator_url")
             or _parse_flag(rest, "facilitator-url")
             or os.environ.get("FLOE_FACILITATOR_URL")
-            or "https://x402.floe.xyz"
+            or "https://credit-api.floelabs.xyz"
         )
         run_revoke_command(rest[0], facilitator_url)
         return

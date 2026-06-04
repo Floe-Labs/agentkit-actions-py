@@ -108,7 +108,7 @@ class OpenCreditLineSchema(BaseModel):
             "Must already exist server-side."
         ),
     )
-    facilitator_url: str = Field(description="The facilitator API base URL (e.g. https://x402.floe.xyz)")
+    facilitator_url: str = Field(description="The facilitator API base URL (e.g. https://credit-api.floelabs.xyz)")
     deposit_usdc: str = Field(description="USDC deposit amount (e.g. '10000' for $10K)")
     max_ltv_bps: int = Field(
         default=9500,
