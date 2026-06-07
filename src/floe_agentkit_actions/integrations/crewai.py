@@ -28,8 +28,10 @@ Two cost planes, both under one ceiling:
   APIs from the credit line. The merchant allowlist (opt-in) restricts which
   vendors the agent may pay.
 * **LLM plane** — ``FloeLLM`` routes GPT/Claude through the Floe-metered proxy
-  (debits the same credit line, refuses past the ceiling). x402-native models
-  need no proxy.
+  at ``<floe-api>/v1/llm`` (debits the same credit line, refuses past the
+  ceiling). The credit key is the ``Authorization: Bearer``; the upstream
+  provider key is passed through via ``X-Floe-Provider-Key`` (Floe holds none).
+  x402-native models need no proxy.
 
 The hard cap (server-side spend limit + facilitator) is the real protection.
 The advisory header / budget-aware backstory are *soft* signals the LLM honors
@@ -223,10 +225,18 @@ def _floe_llm_class() -> Any:
         and breaks ``isinstance``. ``__new__`` returns a configured
         ``crewai.LLM`` instead — it quacks like the constructor.
 
-        ``proxy_base_url`` is the D3 Floe-metered LiteLLM proxy (built in
-        parallel; pass it in, never hardcoded). ``credit_key`` is the ``floe_*``
-        credit key the proxy authenticates and debits. For x402-native models
-        you can point ``proxy_base_url`` straight at the model endpoint.
+        Three credentials, three slots (D3 metered-proxy contract):
+
+        * ``proxy_base_url`` — the D3 endpoint, ``<floe-api>/v1/llm`` (the proxy
+          exposes the OpenAI-compatible ``POST /v1/llm/chat/completions``). Pass
+          it in; never hardcoded. For x402-native models you can point it
+          straight at the model endpoint.
+        * ``credit_key`` — the ``floe_*`` credit/agent key. Sent as
+          ``Authorization: Bearer`` (crewai.LLM ``api_key``); the proxy
+          authenticates and debits the credit line with it.
+        * ``provider_key`` — the upstream OpenAI/Anthropic key. Sent
+          pass-through in the ``X-Floe-Provider-Key`` request header so the proxy
+          can reach upstream. **Floe holds none of these keys.**
         """
 
         def __new__(
@@ -234,10 +244,20 @@ def _floe_llm_class() -> Any:
             model: str,
             proxy_base_url: str | None = None,
             credit_key: str | None = None,
+            provider_key: str | None = None,
             base_url: str | None = None,
             api_key: str | None = None,
+            extra_headers: dict[str, str] | None = None,
             **kwargs: Any,
         ) -> Any:
+            # Pass the upstream provider key through to the proxy via
+            # X-Floe-Provider-Key (LiteLLM forwards extra_headers). Merge so a
+            # caller-supplied header set is preserved.
+            headers = dict(extra_headers) if extra_headers else {}
+            if provider_key is not None:
+                headers["X-Floe-Provider-Key"] = provider_key
+            if headers:
+                kwargs["extra_headers"] = headers
             # crewai.LLM's pydantic __init__ signature confuses mypy (it's
             # actually a __new__ factory taking (model, **kwargs)).
             return LLM(  # type: ignore[misc,arg-type]
@@ -388,6 +408,7 @@ def budget_enabled_agent(
     x402_config: X402Config | None = None,
     llm_model: str = "openai/gpt-4o",
     proxy_base_url: str | None = None,
+    provider_key: str | None = None,
     **agent_kwargs: Any,
 ) -> Any:
     """Provision a budget and return a plain ``crewai.Agent`` wired to Floe.
@@ -402,9 +423,11 @@ def budget_enabled_agent(
     when one is supplied; otherwise CrewAI's default LLM is used.
 
     Args:
-        proxy_base_url: D3 Floe-metered proxy base URL. Pass it in — it is not
-            hardcoded because the proxy is built in parallel. Without it (and
-            without an explicit ``llm``), no FloeLLM is constructed.
+        proxy_base_url: D3 Floe-metered proxy base URL (``<floe-api>/v1/llm``).
+            Pass it in — it is not hardcoded because the proxy ships separately.
+            Without it (and without an explicit ``llm``), no FloeLLM is built.
+        provider_key: upstream OpenAI/Anthropic key, passed through to the proxy
+            via ``X-Floe-Provider-Key`` so it can reach upstream. Floe holds none.
     """
     _require_crewai()
     from crewai import Agent
@@ -421,7 +444,12 @@ def budget_enabled_agent(
     if llm is None and proxy_base_url is not None:
         credit_key = getattr(x402_config, "facilitator_api_key", "") if x402_config else ""
         floe_llm = __getattr__("FloeLLM")
-        llm = floe_llm(llm_model, proxy_base_url=proxy_base_url, credit_key=credit_key)
+        llm = floe_llm(
+            llm_model,
+            proxy_base_url=proxy_base_url,
+            credit_key=credit_key,
+            provider_key=provider_key,
+        )
 
     def _step_callback(step: Any) -> None:
         # Per-agent spend ledger. We record the raw step so a downstream

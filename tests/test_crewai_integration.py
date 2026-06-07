@@ -144,14 +144,43 @@ def test_floe_llm_routes_through_proxy() -> None:
 
     llm = FloeLLM(
         "openai/gpt-4o",
-        proxy_base_url="https://proxy.floe.test/v1",
+        proxy_base_url="https://proxy.floe.test/v1/llm",
         credit_key="floe_credit",
     )
     # crewai.LLM.__new__ returns provider-specific instances (e.g.
     # OpenAICompletion), so it's a BaseLLM, not a crewai.LLM instance.
     assert isinstance(llm, crewai.BaseLLM)
-    assert llm.base_url == "https://proxy.floe.test/v1"
+    assert llm.base_url == "https://proxy.floe.test/v1/llm"
     assert llm.api_key == "floe_credit"
+
+
+def test_floe_llm_passes_provider_key_header() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeLLM
+
+    llm = FloeLLM(
+        "openai/gpt-4o",
+        proxy_base_url="https://proxy.floe.test/v1/llm",
+        credit_key="floe_credit",
+        provider_key="sk-x",
+    )
+    # extra_headers lands in additional_params (LiteLLM forwards it upstream).
+    assert llm.additional_params["extra_headers"] == {"X-Floe-Provider-Key": "sk-x"}
+
+
+def test_floe_llm_merges_caller_extra_headers() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeLLM
+
+    llm = FloeLLM(
+        "openai/gpt-4o",
+        proxy_base_url="https://proxy.floe.test/v1/llm",
+        credit_key="floe_credit",
+        provider_key="sk-x",
+        extra_headers={"X-Trace": "abc"},
+    )
+    assert llm.additional_params["extra_headers"] == {
+        "X-Trace": "abc",
+        "X-Floe-Provider-Key": "sk-x",
+    }
 
 
 # ── FloeBudget.provision ───────────────────────────────────────────────────────
