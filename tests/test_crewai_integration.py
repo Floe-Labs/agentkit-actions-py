@@ -186,17 +186,29 @@ def test_floe_llm_merges_caller_extra_headers() -> None:
 # ── FloeBudget.provision ───────────────────────────────────────────────────────
 
 
-def _budget_provider() -> Any:
+def _budget_provider(key: str = "floe_managed_alpha", agent_id: int = 42) -> Any:
+    """A fake X402 provider whose grant_credit_delegation captures a managed key.
+
+    Mirrors the real provider: grant stashes the freshly-minted managed-agent
+    key on ``_facilitator_api_key`` and returns the markdown success string.
+    """
     provider = MagicMock()
     provider._agent_name = "alpha"
     provider._facilitator_url = "https://credit-api.floelabs.xyz"
+    provider._facilitator_api_key = ""
+
+    def _grant(_wallet: Any, _args: dict) -> str:
+        provider._facilitator_api_key = key
+        return f"## Floe Agent Registered\n\n**Agent ID**: {agent_id}\n**Name**: alpha\n"
+
+    provider.grant_credit_delegation.side_effect = _grant
     return provider
 
 
-def test_budget_provision_issues_delegation_and_spend_limit() -> None:
+def test_budget_provision_creates_managed_agent_and_caps_it() -> None:
     from floe_agentkit_actions.integrations.crewai import FloeBudget
 
-    provider = _budget_provider()
+    provider = _budget_provider(key="floe_managed_alpha", agent_id=42)
     wallet = MagicMock()
     budget = FloeBudget(usd_limit=5.0, max_rate_bps=1200, expiry_seconds=30 * 86400)
 
@@ -209,6 +221,11 @@ def test_budget_provision_issues_delegation_and_spend_limit() -> None:
     assert grant_args["max_rate_bps"] == "1200"
     assert grant_args["expiry_days"] == "30"
 
+    # The managed agent's identity is captured for the runtime to act as.
+    assert budget.agent_key == "floe_managed_alpha"
+    assert budget.agent_id == 42
+    assert budget.facilitator_url == "https://credit-api.floelabs.xyz"
+
     provider.set_spend_limit.assert_called_once()
     _, spend_args = provider.set_spend_limit.call_args[0]
     assert spend_args["limit_raw"] == "5000000"  # $5 in raw USDC
@@ -216,6 +233,40 @@ def test_budget_provision_issues_delegation_and_spend_limit() -> None:
     # No allowlist when allow is None (default = allow any vendor).
     provider.add_allowlist_entry.assert_not_called()
     provider.set_allowlist_mode.assert_not_called()
+
+
+def test_budget_provision_raises_when_grant_fails() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    provider = MagicMock()
+    provider._agent_name = "alpha"
+    provider._facilitator_url = "https://credit-api.floelabs.xyz"
+    provider._facilitator_api_key = ""
+    provider.grant_credit_delegation.return_value = "Agent creation failed: quota exceeded"
+
+    budget = FloeBudget(usd_limit=5.0)
+    with pytest.raises(FloeProvisionError):
+        budget.provision(provider, MagicMock())
+    # Must not cap a non-existent agent.
+    provider.set_spend_limit.assert_not_called()
+
+
+def test_two_budgets_under_one_wallet_do_not_collide() -> None:
+    """Per-role isolation: each budget gets its OWN managed-agent key."""
+    from floe_agentkit_actions.integrations.crewai import FloeBudget
+
+    wallet = MagicMock()  # ONE developer wallet shared by both roles
+
+    researcher = FloeBudget(usd_limit=1.0, name="researcher")
+    buyer = FloeBudget(usd_limit=5.0, name="buyer")
+
+    researcher.provision(_budget_provider(key="floe_researcher", agent_id=1), wallet)
+    buyer.provision(_budget_provider(key="floe_buyer", agent_id=2), wallet)
+
+    assert researcher.agent_key == "floe_researcher"
+    assert buyer.agent_key == "floe_buyer"
+    assert researcher.agent_key != buyer.agent_key
+    assert researcher.agent_id != buyer.agent_id
 
 
 def test_budget_provision_writes_allowlist_when_provided() -> None:
@@ -255,6 +306,24 @@ def test_budget_provision_is_idempotent() -> None:
 
     provider.grant_credit_delegation.assert_called_once()
     provider.set_spend_limit.assert_called_once()
+
+
+def test_zero_budget_is_hard_zero_spend() -> None:
+    """$0 = approval-only role: no credit line, no managed agent, no key."""
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, _usd_to_raw
+
+    provider = _budget_provider()
+    budget = FloeBudget(usd_limit=0, name="manager")
+    budget.provision(provider, MagicMock())
+
+    provider.grant_credit_delegation.assert_not_called()
+    provider.set_spend_limit.assert_not_called()
+    assert budget.agent_key is None  # fail-closed: no spend capability
+
+    # _usd_to_raw allows zero, rejects negatives.
+    assert _usd_to_raw(0) == "0"
+    with pytest.raises(ValueError):
+        _usd_to_raw(-1)
 
 
 # ── budget_enabled_agent ────────────────────────────────────────────────────────
@@ -300,6 +369,73 @@ def test_budget_enabled_agent_can_disable_budget_awareness(mock_wallet: Any) -> 
     tool_names = {t.name for t in agent.tools}
     assert "floe_budget_status" not in tool_names
     assert agent.backstory == "plain."
+
+
+def test_budget_enabled_agent_threads_managed_key_into_tools(
+    mock_wallet: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The role's tools act AS its managed agent, and two roles stay isolated."""
+    import floe_agentkit_actions.integrations.crewai as crewai_mod
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, budget_enabled_agent
+
+    # x402_action_provider returns a distinct fake managed provider per role.
+    providers = [
+        _budget_provider(key="floe_researcher", agent_id=1),
+        _budget_provider(key="floe_buyer", agent_id=2),
+    ]
+    monkeypatch.setattr(crewai_mod, "x402_action_provider", lambda cfg=None: providers.pop(0))
+
+    # Capture the x402_config the tools are built with for each role.
+    seen_configs: list[Any] = []
+
+    def _fake_tools(wallet: Any, config: Any = None, x402_config: Any = None) -> list[Any]:
+        seen_configs.append(x402_config)
+        return []
+
+    monkeypatch.setattr(crewai_mod, "get_floe_crewai_tools", _fake_tools)
+
+    wallet = MagicMock()
+    budget_enabled_agent(
+        role="Researcher", goal="g", backstory="b",
+        budget=FloeBudget(usd_limit=1.0, name="researcher"),
+        wallet_provider=wallet, x402_config=X402Config(facilitator_url="https://credit-api.floelabs.xyz"),
+    )
+    budget_enabled_agent(
+        role="Buyer", goal="g", backstory="b",
+        budget=FloeBudget(usd_limit=5.0, name="buyer"),
+        wallet_provider=wallet, x402_config=X402Config(facilitator_url="https://credit-api.floelabs.xyz"),
+    )
+
+    assert seen_configs[0].facilitator_api_key == "floe_researcher"
+    assert seen_configs[1].facilitator_api_key == "floe_buyer"
+    assert seen_configs[0].facilitator_api_key != seen_configs[1].facilitator_api_key
+
+
+def test_floe402_tool_records_structured_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    import floe_agentkit_actions.integrations.crewai as crewai_mod
+    from floe_agentkit_actions.integrations.crewai import Floe402Tool
+
+    class _FakeResult:
+        body = "data"
+        cost = 0.0025
+        cost_raw = "2500"
+
+    class _FakeAgent:
+        def __init__(self, api_key: str, base_url: str) -> None:
+            pass
+
+        def fetch(self, **kwargs: Any) -> Any:
+            return _FakeResult()
+
+    monkeypatch.setattr(crewai_mod, "FloeAgent", _FakeAgent)
+
+    ledger: list[dict[str, Any]] = []
+    tool = Floe402Tool(url="https://api.example.com", api_key="floe_k", ledger=ledger)
+    tool.run()
+
+    assert ledger == [
+        {"url": "https://api.example.com", "cost": 0.0025, "cost_raw": "2500", "tool": "floe_paid_fetch"}
+    ]
 
 
 # ── D1 allowlist actions (HTTP mocked) ─────────────────────────────────────────

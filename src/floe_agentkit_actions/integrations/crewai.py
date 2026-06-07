@@ -40,6 +40,7 @@ unreliably — useful for finishing on budget, not for enforcement.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable
@@ -67,10 +68,14 @@ def _require_crewai() -> Any:
 
 
 def _usd_to_raw(usd: float | str) -> str:
-    """Convert a dollar amount to raw USDC integer units (6 decimals)."""
+    """Convert a dollar amount to raw USDC integer units (6 decimals).
+
+    Zero is allowed (an approval-only / hard zero-spend role); only negatives
+    are rejected.
+    """
     scaled = (Decimal(str(usd)) * USDC_SCALE).to_integral_value()
-    if scaled <= 0:
-        raise ValueError(f"amount must be positive, got {usd!r}")
+    if scaled < 0:
+        raise ValueError(f"amount must not be negative, got {usd!r}")
     return str(int(scaled))
 
 
@@ -169,6 +174,10 @@ def _floe402_tool_class() -> Any:
         The developer wires it with a ``floe_*`` credit key at construction;
         each ``_run`` triggers the x402 flow (auto-borrow + pay) through the
         facilitator and returns the response body. The agent just invokes it.
+
+        Pass a ``ledger`` list to record the per-call USDC cost as structured
+        data (``{"url", "cost", "cost_raw", "tool"}``) so callers read accurate
+        spend without string-parsing the response note.
         """
 
         name: str = "floe_paid_fetch"
@@ -184,15 +193,26 @@ def _floe402_tool_class() -> Any:
         body: str | None = None
         api_key: str
         base_url: str = DEFAULT_BASE_URL
+        # Typed Any so pydantic stores the caller's exact list object (a typed
+        # list field would be re-validated into a copy, breaking append identity).
+        ledger: Any = None
 
         def _run(self, url: str | None = None, body: str | None = None) -> str:
+            target = url or self.url
             agent = FloeAgent(api_key=self.api_key, base_url=self.base_url)
             result = agent.fetch(
-                url=url or self.url,
+                url=target,
                 method=self.method,
                 headers=self.headers,
                 body=body if body is not None else self.body,
             )
+            if self.ledger is not None:
+                self.ledger.append({
+                    "url": target,
+                    "cost": result.cost,
+                    "cost_raw": result.cost_raw,
+                    "tool": self.name,
+                })
             note = f"*Paid via x402 — ${result.cost:.6f} USDC*\n\n" if result.cost else ""
             return f"{note}{result.body}"
 
@@ -260,8 +280,8 @@ def _floe_llm_class() -> Any:
                 kwargs["extra_headers"] = headers
             # crewai.LLM's pydantic __init__ signature confuses mypy (it's
             # actually a __new__ factory taking (model, **kwargs)).
-            return LLM(  # type: ignore[misc,arg-type]
-                model,
+            return LLM(  # type: ignore[misc]
+                model,  # type: ignore[arg-type]
                 base_url=base_url or proxy_base_url,
                 api_key=api_key or credit_key,
                 **kwargs,
@@ -273,19 +293,34 @@ def _floe_llm_class() -> Any:
 # ── FloeBudget — provision one ceiling across the whole crew ───────────────────
 
 
+class FloeProvisionError(RuntimeError):
+    """Raised when ``FloeBudget.provision`` fails to create the managed agent."""
+
+
 @dataclass
 class FloeBudget:
-    """One spend ceiling for a crew: credit line + session cap + (opt-in) allowlist.
+    """One spend ceiling for ONE budgeted role: its own managed agent + cap.
+
+    Provisioning creates a dedicated Floe **managed agent** (its own Privy
+    wallet + scoped API key) under the caller's developer wallet, then caps it.
+    Every budgeted role gets its own managed agent, so N roles under ONE
+    developer wallet stay fully isolated — no per-role private keys needed.
+    (Floe caps managed agents at 5 per developer, which is plenty for a crew.)
 
     Fields:
         usd_limit: the hard dollar ceiling. Used both as the on-chain credit
             line and the session spend cap, so tool + LLM spend share one wall.
+            ``0`` = an approval-only role: no credit line, hard zero-spend.
         allow: optional ``{host_or_payee: cap}`` map. ``None`` (the default)
             allows any vendor — no enumeration, low onboarding friction. When
             provided, becomes default-deny on both host and payee.
         max_rate_bps: max borrow rate for the credit delegation.
         expiry_seconds: delegation lifetime.
         name: agent label for the credit delegation (defaults to the provider's).
+
+    Captured after ``provision`` (the managed agent's identity — thread
+    ``agent_key`` into the role's runtime so its spend is isolated):
+        agent_key, agent_id, agent_name, facilitator_url.
     """
 
     usd_limit: float
@@ -293,23 +328,42 @@ class FloeBudget:
     max_rate_bps: int = 1500
     expiry_seconds: int = 90 * 86400
     name: str | None = None
+    # Captured from the freshly-provisioned managed agent.
+    agent_key: str | None = field(default=None, repr=False)
+    agent_id: int | None = None
+    agent_name: str | None = None
+    facilitator_url: str | None = None
     _provisioned: bool = field(default=False, repr=False)
 
     def provision(self, provider: X402ActionProvider, wallet_provider: Any) -> None:
-        """Issue the credit delegation, session cap, and (opt-in) allowlist.
+        """Create + cap a dedicated managed agent for this role. Idempotent.
 
-        Idempotent: a second call is a no-op. Allowlist entries are only written
-        when ``allow`` is provided, and the mode is flipped to 'both' so both the
-        host (pre-fetch) and payee (pre-sign) gates enforce them.
+        Steps:
+          1. ``grant_credit_delegation`` — server-creates a managed agent (its
+             own Privy wallet + API key). The key is captured onto ``agent_key``
+             (read from the provider, which authenticates AS that managed agent
+             for every subsequent agent-key call).
+          2. ``set_spend_limit`` + (opt-in) allowlist entries + ``allowlist_mode
+             ('both')`` — applied to THAT managed agent, not the caller wallet.
+
+        ``usd_limit == 0`` short-circuits to a hard zero-spend role: no credit
+        line, no managed agent, no key — paid calls fail closed server-side.
         """
         if self._provisioned:
+            return
+
+        if self.usd_limit == 0:
+            # Approval-only role. Nothing to provision; leave agent_key None so
+            # the runtime has no spend capability (fail-closed).
+            self.agent_name = self.name or getattr(provider, "_agent_name", "") or None
+            self._provisioned = True
             return
 
         name = self.name or getattr(provider, "_agent_name", "") or "crewai-agent"
         facilitator_url = getattr(provider, "_facilitator_url", "")
         expiry_days = max(1, self.expiry_seconds // 86400)
 
-        provider.grant_credit_delegation(
+        result = provider.grant_credit_delegation(
             wallet_provider,
             {
                 "name": name,
@@ -319,6 +373,25 @@ class FloeBudget:
                 "expiry_days": str(expiry_days),
             },
         )
+        # grant_credit_delegation returns markdown ("## Floe Agent Registered"
+        # on success) and stashes the new managed-agent key on the provider.
+        if not isinstance(result, str) or not result.startswith("## Floe Agent Registered"):
+            raise FloeProvisionError(f"credit delegation failed: {result}")
+        agent_key = getattr(provider, "_facilitator_api_key", "") or ""
+        if not agent_key:
+            raise FloeProvisionError(
+                "credit delegation reported success but no managed-agent key was captured."
+            )
+        # Capture the managed agent's identity for the runtime to act as.
+        self.agent_key = agent_key
+        self.agent_name = getattr(provider, "_agent_name", name) or name
+        self.facilitator_url = getattr(provider, "_facilitator_url", "") or facilitator_url
+        match = re.search(r"\*\*Agent ID\*\*:\s*(\d+)", result)
+        if match:
+            self.agent_id = int(match.group(1))
+
+        # All of the following authenticate AS the managed agent via the
+        # provider's captured key (wallet_provider is ignored by these actions).
         provider.set_spend_limit(
             wallet_provider,
             {"limit_raw": _usd_to_raw(self.usd_limit)},
@@ -372,7 +445,13 @@ def _make_budget_status_tool(state: _BudgetState) -> Any:
             lines = ["## Budget Status\n"]
             if state.usd_limit is not None:
                 lines.append(f"**Limit**: ${state.usd_limit:.2f}")
-            spent = sum(float(e.get("cost", 0.0)) for e in state.ledger)
+            # Sum only entries carrying a real, numeric USDC cost (paid tool
+            # calls). Bare step records contribute nothing — no fabricated 0.0.
+            spent = sum(
+                float(e["cost"])
+                for e in state.ledger
+                if isinstance(e.get("cost"), (int, float))
+            )
             lines.append(f"**Spent this run**: ${spent:.6f}")
             if state.usd_limit:
                 remaining = max(0.0, state.usd_limit - spent)
@@ -416,11 +495,13 @@ def budget_enabled_agent(
     Returns a PLAIN ``crewai.Agent`` (no subclass) — enforcement lives in the
     credit line + facilitator, never in agent internals.
 
-    The budget is provisioned (credit delegation + session cap + opt-in
-    allowlist). Tools are the converted Floe AgentKit actions plus, when
-    ``budget_aware``, a ``floe_budget_status`` tool and a budget-aware backstory
-    addition. ``llm`` defaults to a ``FloeLLM`` routed through ``proxy_base_url``
-    when one is supplied; otherwise CrewAI's default LLM is used.
+    Provisioning creates a DEDICATED managed agent for this role and the
+    returned tools + ``FloeLLM`` are wired to act AS that managed agent, so two
+    budgeted roles under ONE ``wallet_provider`` stay isolated (distinct credit
+    lines) — they no longer collide. Tools are the converted Floe AgentKit
+    actions plus, when ``budget_aware``, a ``floe_budget_status`` tool and a
+    budget-aware backstory. ``llm`` defaults to a ``FloeLLM`` routed through
+    ``proxy_base_url`` (with this role's managed key) when one is supplied.
 
     Args:
         proxy_base_url: D3 Floe-metered proxy base URL (``<floe-api>/v1/llm``).
@@ -435,27 +516,40 @@ def budget_enabled_agent(
     provider = x402_action_provider(x402_config)
     budget.provision(provider, wallet_provider)
 
+    # Wire the role's runtime to act AS the freshly-provisioned managed agent so
+    # its tool spend hits THIS role's isolated credit line, not the caller's.
+    # A $0 / unprovisioned role has no key -> x402 tools fail closed (zero-spend).
+    fallback_url = x402_config.facilitator_url if x402_config else ""
+    managed_kwargs: dict[str, Any] = {
+        "facilitator_url": budget.facilitator_url or fallback_url,
+        "facilitator_api_key": budget.agent_key or "",
+        "agent_name": budget.agent_name or "",
+    }
+    if x402_config and x402_config.matcher_address:
+        managed_kwargs["matcher_address"] = x402_config.matcher_address
+    managed_x402_config = X402Config(**managed_kwargs)
+
     state = _BudgetState(usd_limit=budget.usd_limit)
-    tools = get_floe_crewai_tools(wallet_provider, config, x402_config)
+    tools = get_floe_crewai_tools(wallet_provider, config, managed_x402_config)
     if budget_aware:
         tools.append(_make_budget_status_tool(state))
         backstory = backstory + _BUDGET_AWARE_BACKSTORY
 
     if llm is None and proxy_base_url is not None:
-        credit_key = getattr(x402_config, "facilitator_api_key", "") if x402_config else ""
+        # The credit key the proxy debits is THIS role's managed-agent key.
         floe_llm = __getattr__("FloeLLM")
         llm = floe_llm(
             llm_model,
             proxy_base_url=proxy_base_url,
-            credit_key=credit_key,
+            credit_key=budget.agent_key or "",
             provider_key=provider_key,
         )
 
     def _step_callback(step: Any) -> None:
-        # Per-agent spend ledger. We record the raw step so a downstream
-        # consumer can price it; cost defaults to 0 until the proxy/x402 path
-        # reports one via the advisory.
-        state.ledger.append({"step": step, "cost": 0.0})
+        # Record step occurrence only — no fabricated cost. Accurate per-call
+        # USDC cost is recorded as structured data by Floe402Tool(ledger=...);
+        # floe_budget_status sums those real costs.
+        state.ledger.append({"step": repr(step)})
 
     if llm is not None:
         agent_kwargs.setdefault("llm", llm)
@@ -471,6 +565,7 @@ __all__ = [
     "Floe402Tool",  # noqa: F822
     "FloeLLM",  # noqa: F822
     "FloeBudget",
+    "FloeProvisionError",
     "budget_enabled_agent",
     "_action_to_tool",
 ]
