@@ -326,20 +326,99 @@ def test_zero_budget_is_hard_zero_spend() -> None:
         _usd_to_raw(-1)
 
 
+def test_provision_raises_on_missing_facilitator_url() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    provider = _budget_provider()
+    provider._facilitator_url = ""  # not configured
+    budget = FloeBudget(usd_limit=5.0)
+
+    with pytest.raises(FloeProvisionError, match="facilitator_url"):
+        budget.provision(provider, MagicMock())
+    provider.grant_credit_delegation.assert_not_called()  # fail BEFORE minting
+    assert budget._provisioned is False
+
+
+def test_provision_raises_when_set_spend_limit_errors() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    provider = _budget_provider()
+    provider.set_spend_limit.return_value = "Error: cap rejected"
+    budget = FloeBudget(usd_limit=5.0)
+
+    with pytest.raises(FloeProvisionError, match="spend limit"):
+        budget.provision(provider, MagicMock())
+    # Never leave an uncapped agent marked provisioned, never touch allowlist.
+    assert budget._provisioned is False
+    provider.set_allowlist_mode.assert_not_called()
+
+
+def test_provision_raises_when_allowlist_entry_errors_and_skips_mode() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    provider = _budget_provider()
+    provider.add_allowlist_entry.return_value = "Error: invalid entry"
+    budget = FloeBudget(usd_limit=5.0, allow={"api.example.com": "2"})
+
+    with pytest.raises(FloeProvisionError):
+        budget.provision(provider, MagicMock())
+    # Mode must NOT be flipped if any entry failed (no empty-allowlist lockout).
+    provider.set_allowlist_mode.assert_not_called()
+    assert budget._provisioned is False
+
+
+def test_provision_is_resumable_without_reminting_agent() -> None:
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    provider = _budget_provider(key="floe_managed_alpha")
+    # First set_spend_limit fails, second (on retry) succeeds.
+    provider.set_spend_limit.side_effect = ["Error: transient", "## Spend Limit Set\n"]
+    budget = FloeBudget(usd_limit=5.0)
+
+    with pytest.raises(FloeProvisionError):
+        budget.provision(provider, MagicMock())
+    # Managed agent already minted + captured on the first attempt.
+    assert budget.agent_key == "floe_managed_alpha"
+    assert budget._provisioned is False
+
+    # Retry resumes from the capping step — no second agent minted.
+    budget.provision(provider, MagicMock())
+    assert budget._provisioned is True
+    provider.grant_credit_delegation.assert_called_once()
+    assert provider.set_spend_limit.call_count == 2
+
+
+def test_looks_like_address_is_strict() -> None:
+    from floe_agentkit_actions.integrations.crewai import _looks_like_address
+
+    assert _looks_like_address("0x" + "ab" * 20) is True
+    assert _looks_like_address("0x" + "z" * 40) is False  # non-hex
+    assert _looks_like_address("0x" + "a" * 39) is False  # too short
+    assert _looks_like_address("nope") is False
+
+
 # ── budget_enabled_agent ────────────────────────────────────────────────────────
 
 
-def test_budget_enabled_agent_returns_plain_agent(mock_wallet: Any) -> None:
-    from floe_agentkit_actions.integrations.crewai import FloeBudget, budget_enabled_agent
+def _provisioned_budget(usd_limit: float = 5.0, key: str = "floe_managed") -> Any:
+    """A FloeBudget already provisioned (skips network) with a managed key set."""
+    from floe_agentkit_actions.integrations.crewai import FloeBudget
 
-    budget = FloeBudget(usd_limit=5.0)
-    budget._provisioned = True  # skip the network-bound provisioning
+    budget = FloeBudget(usd_limit=usd_limit)
+    budget.agent_key = key
+    budget.facilitator_url = "https://credit-api.floelabs.xyz"
+    budget._provisioned = True
+    return budget
+
+
+def test_budget_enabled_agent_returns_plain_agent(mock_wallet: Any) -> None:
+    from floe_agentkit_actions.integrations.crewai import budget_enabled_agent
 
     agent = budget_enabled_agent(
         role="Researcher",
         goal="Find cheap data",
         backstory="A frugal analyst.",
-        budget=budget,
+        budget=_provisioned_budget(),
         wallet_provider=mock_wallet,
     )
 
@@ -352,16 +431,13 @@ def test_budget_enabled_agent_returns_plain_agent(mock_wallet: Any) -> None:
 
 
 def test_budget_enabled_agent_can_disable_budget_awareness(mock_wallet: Any) -> None:
-    from floe_agentkit_actions.integrations.crewai import FloeBudget, budget_enabled_agent
-
-    budget = FloeBudget(usd_limit=5.0)
-    budget._provisioned = True
+    from floe_agentkit_actions.integrations.crewai import budget_enabled_agent
 
     agent = budget_enabled_agent(
         role="R",
         goal="g",
         backstory="plain.",
-        budget=budget,
+        budget=_provisioned_budget(),
         wallet_provider=mock_wallet,
         budget_aware=False,
     )
@@ -371,19 +447,34 @@ def test_budget_enabled_agent_can_disable_budget_awareness(mock_wallet: Any) -> 
     assert agent.backstory == "plain."
 
 
+def test_zero_budget_role_has_no_paid_tools(mock_wallet: Any) -> None:
+    """A $0 / no-key role gets NO facilitator-backed x402 tools (fail-closed)."""
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, budget_enabled_agent
+
+    budget = FloeBudget(usd_limit=0, name="manager")
+    budget._provisioned = True  # provision() would no-op anyway for $0
+
+    agent = budget_enabled_agent(
+        role="Manager",
+        goal="Approve",
+        backstory="An approver.",
+        budget=budget,
+        wallet_provider=mock_wallet,
+    )
+
+    tool_names = {t.name for t in agent.tools}
+    assert not any(n.startswith("X402ActionProvider_") for n in tool_names)
+    assert not any(n.endswith("x402_fetch") for n in tool_names)
+    # Budget-status tool is still present (reports approval-only).
+    assert "floe_budget_status" in tool_names
+
+
 def test_budget_enabled_agent_threads_managed_key_into_tools(
     mock_wallet: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The role's tools act AS its managed agent, and two roles stay isolated."""
     import floe_agentkit_actions.integrations.crewai as crewai_mod
-    from floe_agentkit_actions.integrations.crewai import FloeBudget, budget_enabled_agent
-
-    # x402_action_provider returns a distinct fake managed provider per role.
-    providers = [
-        _budget_provider(key="floe_researcher", agent_id=1),
-        _budget_provider(key="floe_buyer", agent_id=2),
-    ]
-    monkeypatch.setattr(crewai_mod, "x402_action_provider", lambda cfg=None: providers.pop(0))
+    from floe_agentkit_actions.integrations.crewai import budget_enabled_agent
 
     # Capture the x402_config the tools are built with for each role.
     seen_configs: list[Any] = []
@@ -397,13 +488,13 @@ def test_budget_enabled_agent_threads_managed_key_into_tools(
     wallet = MagicMock()
     budget_enabled_agent(
         role="Researcher", goal="g", backstory="b",
-        budget=FloeBudget(usd_limit=1.0, name="researcher"),
-        wallet_provider=wallet, x402_config=X402Config(facilitator_url="https://credit-api.floelabs.xyz"),
+        budget=_provisioned_budget(usd_limit=1.0, key="floe_researcher"),
+        wallet_provider=wallet,
     )
     budget_enabled_agent(
         role="Buyer", goal="g", backstory="b",
-        budget=FloeBudget(usd_limit=5.0, name="buyer"),
-        wallet_provider=wallet, x402_config=X402Config(facilitator_url="https://credit-api.floelabs.xyz"),
+        budget=_provisioned_budget(usd_limit=5.0, key="floe_buyer"),
+        wallet_provider=wallet,
     )
 
     assert seen_configs[0].facilitator_api_key == "floe_researcher"
@@ -436,6 +527,43 @@ def test_floe402_tool_records_structured_cost(monkeypatch: pytest.MonkeyPatch) -
     assert ledger == [
         {"url": "https://api.example.com", "cost": 0.0025, "cost_raw": "2500", "tool": "floe_paid_fetch"}
     ]
+
+
+def test_floe_budget_status_surfaces_live_facilitator_numbers() -> None:
+    from floe_agentkit_actions.integrations.crewai import _BudgetState, _make_budget_status_tool
+
+    provider = MagicMock()
+    provider.get_credit_remaining.return_value = (
+        "## Credit Remaining\n**Available**: $4.20 USDC\n**Utilization**: 16.00%"
+    )
+    provider.get_spend_limit.return_value = "## Spend Limit\n**Cap**: $5.00 USDC"
+
+    state = _BudgetState(usd_limit=5.0)
+    tool = _make_budget_status_tool(
+        state, provider=provider, wallet_provider=MagicMock(), has_credit_line=True
+    )
+    out = tool.run()
+
+    provider.get_credit_remaining.assert_called_once()
+    provider.get_spend_limit.assert_called_once()
+    assert "$4.20 USDC" in out  # authoritative, not a hollow "$0"
+    assert "16.00%" in out
+    assert "$5.00 USDC" in out
+    # The description must not lie about what the tool returns.
+    assert "available" in tool.description.lower()
+    assert "facilitator" in tool.description.lower()
+
+
+def test_floe_budget_status_zero_role_reports_approval_only() -> None:
+    from floe_agentkit_actions.integrations.crewai import _BudgetState, _make_budget_status_tool
+
+    provider = MagicMock()
+    state = _BudgetState(usd_limit=0.0)
+    tool = _make_budget_status_tool(state, provider=provider, has_credit_line=False)
+    out = tool.run()
+
+    provider.get_credit_remaining.assert_not_called()
+    assert "approval-only" in out.lower()
 
 
 # ── D1 allowlist actions (HTTP mocked) ─────────────────────────────────────────
