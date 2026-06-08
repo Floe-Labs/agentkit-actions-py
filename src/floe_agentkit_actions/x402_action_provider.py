@@ -1394,13 +1394,35 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def add_allowlist_entry(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
+            kind = args["kind"]
+            match_key = args["match_key"]
+            match_kind = args.get("match_kind")
+            # Kind-aware cross-field validation BEFORE hitting the API, so the LLM
+            # gets a clear error instead of an opaque 400. Mirrors the TS/MCP port.
+            if kind == "vendor":
+                if not re.match(_ADDRESS_PATTERN, match_key):
+                    return (
+                        "Error: vendor allowlist entries require match_key to be a "
+                        f"wallet address (0x + 40 hex chars), got {match_key!r}."
+                    )
+                if match_kind is not None and match_kind != "recipient":
+                    return (
+                        "Error: for kind='vendor', match_kind must be 'recipient' "
+                        f"(or omitted), got {match_kind!r}."
+                    )
+            elif kind == "api":
+                if match_kind is not None and match_kind not in ("host_exact", "host_suffix"):
+                    return (
+                        "Error: for kind='api', match_kind must be 'host_exact' or "
+                        f"'host_suffix' (or omitted), got {match_kind!r}."
+                    )
             body: dict[str, Any] = {
-                "kind": args["kind"],
-                "matchKey": args["match_key"],
+                "kind": kind,
+                "matchKey": match_key,
                 "limitRaw": args["limit_raw"],
             }
-            if args.get("match_kind"):
-                body["matchKind"] = args["match_kind"]
+            if match_kind:
+                body["matchKind"] = match_kind
             resp = self._facilitator_fetch("/agents/policies", method="POST", body=body)
             if resp["status"] >= 400:
                 err = resp["body"]

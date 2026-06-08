@@ -493,6 +493,62 @@ def test_add_allowlist_entry_posts_policy(x402_provider: X402ActionProvider) -> 
     assert "#7" in out
 
 
+def test_add_allowlist_entry_posts_valid_vendor(x402_provider: X402ActionProvider) -> None:
+    payee = "0x" + "ab" * 20
+    x402_provider._facilitator_fetch = MagicMock(  # type: ignore[method-assign]
+        return_value={
+            "status": 201,
+            "body": {"policy": {"id": 9, "kind": "vendor", "matchKey": payee, "limitRaw": "1000000"}},
+            "headers": {},
+        }
+    )
+    out = x402_provider.add_allowlist_entry(
+        MagicMock(),
+        {"kind": "vendor", "match_key": payee, "limit_raw": "1000000", "match_kind": "recipient"},
+    )
+
+    x402_provider._facilitator_fetch.assert_called_once_with(
+        "/agents/policies",
+        method="POST",
+        body={"kind": "vendor", "matchKey": payee, "limitRaw": "1000000", "matchKind": "recipient"},
+    )
+    assert "#9" in out
+
+
+def test_add_allowlist_entry_rejects_vendor_non_address(x402_provider: X402ActionProvider) -> None:
+    x402_provider._facilitator_fetch = MagicMock()  # type: ignore[method-assign]
+    out = x402_provider.add_allowlist_entry(
+        MagicMock(), {"kind": "vendor", "match_key": "not-an-address", "limit_raw": "1000000"}
+    )
+
+    assert out.startswith("Error:")
+    assert "wallet address" in out
+    x402_provider._facilitator_fetch.assert_not_called()  # local validation, no HTTP
+
+
+def test_add_allowlist_entry_rejects_vendor_wrong_match_kind(x402_provider: X402ActionProvider) -> None:
+    payee = "0x" + "cd" * 20
+    x402_provider._facilitator_fetch = MagicMock()  # type: ignore[method-assign]
+    out = x402_provider.add_allowlist_entry(
+        MagicMock(),
+        {"kind": "vendor", "match_key": payee, "limit_raw": "1000000", "match_kind": "host_suffix"},
+    )
+
+    assert out.startswith("Error:")
+    x402_provider._facilitator_fetch.assert_not_called()
+
+
+def test_add_allowlist_entry_rejects_api_recipient_match_kind(x402_provider: X402ActionProvider) -> None:
+    x402_provider._facilitator_fetch = MagicMock()  # type: ignore[method-assign]
+    out = x402_provider.add_allowlist_entry(
+        MagicMock(),
+        {"kind": "api", "match_key": "x.com", "limit_raw": "2000000", "match_kind": "recipient"},
+    )
+
+    assert out.startswith("Error:")
+    x402_provider._facilitator_fetch.assert_not_called()
+
+
 def test_remove_allowlist_entry_deletes_policy(x402_provider: X402ActionProvider) -> None:
     x402_provider._facilitator_fetch = MagicMock(  # type: ignore[method-assign]
         return_value={"status": 200, "body": {"status": "revoked"}, "headers": {}}
