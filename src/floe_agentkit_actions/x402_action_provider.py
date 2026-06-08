@@ -403,6 +403,14 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         if not self._facilitator_url:
             raise ValueError("facilitator_url not configured")
 
+        # The facilitator serves ONLY versioned routes — an unversioned path
+        # 404s in production. Enforce the invariant so a missed/new path fails
+        # loudly here instead of silently breaking end-to-end.
+        if not path.startswith("/v1/"):
+            raise ValueError(
+                f"facilitator path must be versioned (start with '/v1/'): {path!r}"
+            )
+
         url = f"{self._facilitator_url}{path}"
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -815,7 +823,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_fetch(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/proxy/fetch", "POST", {
+            resp = self._facilitator_fetch("/v1/proxy/fetch", "POST", {
                 "url": args["url"],
                 "method": args.get("method", "GET"),
                 "headers": args.get("headers"),
@@ -888,7 +896,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_get_balance(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/balance")
+            resp = self._facilitator_fetch("/v1/agents/balance")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"
 
@@ -961,7 +969,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         timeout_seconds = max(0.1, float(args.get("timeout_seconds", 900.0)))
 
         deadline = _time.monotonic() + timeout_seconds
-        path = f"/agents/reservations/{_quote(nonce, safe='')}"
+        path = f"/v1/agents/reservations/{_quote(nonce, safe='')}"
         last_state: Optional[str] = None
         while True:
             remaining = deadline - _time.monotonic()
@@ -1034,7 +1042,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 limit = min(parsed, 100) if parsed > 0 else 20
             except (ValueError, TypeError):
                 limit = 20
-            resp = self._facilitator_fetch(f"/agents/transactions?limit={limit}")
+            resp = self._facilitator_fetch(f"/v1/agents/transactions?limit={limit}")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"
 
@@ -1077,7 +1085,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_credit_remaining(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/credit-remaining")
+            resp = self._facilitator_fetch("/v1/agents/credit-remaining")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1110,7 +1118,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_loan_state(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/loan-state")
+            resp = self._facilitator_fetch("/v1/agents/loan-state")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1137,7 +1145,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/spend-limit")
+            resp = self._facilitator_fetch("/v1/agents/spend-limit")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1167,7 +1175,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def set_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                "/agents/spend-limit",
+                "/v1/agents/spend-limit",
                 method="PUT",
                 body={"limitRaw": args["limit_raw"]},
             )
@@ -1194,7 +1202,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def clear_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/spend-limit", method="DELETE")
+            resp = self._facilitator_fetch("/v1/agents/spend-limit", method="DELETE")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             return "## Spend Limit Cleared\n\nNo cap is now active."
@@ -1213,7 +1221,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def list_credit_thresholds(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/credit-thresholds")
+            resp = self._facilitator_fetch("/v1/agents/credit-thresholds")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             subs = resp["body"].get("subscriptions", [])
@@ -1250,7 +1258,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             body: dict[str, Any] = {"thresholdBps": args["threshold_bps"]}
             if args.get("webhook_id") is not None:
                 body["webhookId"] = args["webhook_id"]
-            resp = self._facilitator_fetch("/agents/credit-thresholds", method="POST", body=body)
+            resp = self._facilitator_fetch("/v1/agents/credit-thresholds", method="POST", body=body)
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1276,7 +1284,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def delete_credit_threshold(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                f"/agents/credit-thresholds/{args['id']}",
+                f"/v1/agents/credit-thresholds/{args['id']}",
                 method="DELETE",
             )
             if resp["status"] >= 400:
@@ -1301,7 +1309,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             body: dict[str, Any] = {"url": args["url"]}
             if args.get("method"):
                 body["method"] = args["method"]
-            resp = self._facilitator_fetch("/x402/estimate", method="POST", body=body)
+            resp = self._facilitator_fetch("/v1/x402/estimate", method="POST", body=body)
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1353,7 +1361,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def set_allowlist_mode(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                "/agents/allowlist-mode",
+                "/v1/agents/allowlist-mode",
                 method="PUT",
                 body={"mode": args["mode"]},
             )
@@ -1373,7 +1381,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_allowlist_mode(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/allowlist-mode")
+            resp = self._facilitator_fetch("/v1/agents/allowlist-mode")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             return f"## Allowlist Mode\n\n**Mode**: `{resp['body'].get('mode', 'off')}`"
@@ -1423,7 +1431,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             }
             if match_kind:
                 body["matchKind"] = match_kind
-            resp = self._facilitator_fetch("/agents/policies", method="POST", body=body)
+            resp = self._facilitator_fetch("/v1/agents/policies", method="POST", body=body)
             if resp["status"] >= 400:
                 err = resp["body"]
                 return f"Error: {(err or {}).get('message', (err or {}).get('error', 'Unknown'))}"
@@ -1446,7 +1454,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def remove_allowlist_entry(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                f"/agents/policies/{args['policy_id']}",
+                f"/v1/agents/policies/{args['policy_id']}",
                 method="DELETE",
             )
             if resp["status"] >= 400:
@@ -1467,7 +1475,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def list_allowlist(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/policies")
+            resp = self._facilitator_fetch("/v1/agents/policies")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             policies = resp["body"].get("policies", [])

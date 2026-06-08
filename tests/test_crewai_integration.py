@@ -586,7 +586,7 @@ def test_set_allowlist_mode_calls_endpoint(x402_provider: X402ActionProvider) ->
     out = x402_provider.set_allowlist_mode(MagicMock(), {"mode": "both"})
 
     x402_provider._facilitator_fetch.assert_called_once_with(
-        "/agents/allowlist-mode", method="PUT", body={"mode": "both"}
+        "/v1/agents/allowlist-mode", method="PUT", body={"mode": "both"}
     )
     assert "both" in out
 
@@ -597,7 +597,7 @@ def test_get_allowlist_mode_calls_endpoint(x402_provider: X402ActionProvider) ->
     )
     out = x402_provider.get_allowlist_mode(MagicMock(), {})
 
-    x402_provider._facilitator_fetch.assert_called_once_with("/agents/allowlist-mode")
+    x402_provider._facilitator_fetch.assert_called_once_with("/v1/agents/allowlist-mode")
     assert "host" in out
 
 
@@ -614,7 +614,7 @@ def test_add_allowlist_entry_posts_policy(x402_provider: X402ActionProvider) -> 
     )
 
     x402_provider._facilitator_fetch.assert_called_once_with(
-        "/agents/policies",
+        "/v1/agents/policies",
         method="POST",
         body={"kind": "api", "matchKey": "x.com", "limitRaw": "2000000"},
     )
@@ -636,7 +636,7 @@ def test_add_allowlist_entry_posts_valid_vendor(x402_provider: X402ActionProvide
     )
 
     x402_provider._facilitator_fetch.assert_called_once_with(
-        "/agents/policies",
+        "/v1/agents/policies",
         method="POST",
         body={"kind": "vendor", "matchKey": payee, "limitRaw": "1000000", "matchKind": "recipient"},
     )
@@ -684,7 +684,7 @@ def test_remove_allowlist_entry_deletes_policy(x402_provider: X402ActionProvider
     out = x402_provider.remove_allowlist_entry(MagicMock(), {"policy_id": 7})
 
     x402_provider._facilitator_fetch.assert_called_once_with(
-        "/agents/policies/7", method="DELETE"
+        "/v1/agents/policies/7", method="DELETE"
     )
     assert "#7" in out
 
@@ -705,10 +705,60 @@ def test_list_allowlist_filters_to_allowlist_kinds(x402_provider: X402ActionProv
     )
     out = x402_provider.list_allowlist(MagicMock(), {})
 
-    x402_provider._facilitator_fetch.assert_called_once_with("/agents/policies")
+    x402_provider._facilitator_fetch.assert_called_once_with("/v1/agents/policies")
     assert "#1" in out
     assert "#3" in out
     assert "#2" not in out  # session policy excluded
+
+
+# ── /v1 versioning guard (prod serves ONLY /v1/*) ──────────────────────────────
+
+
+def test_facilitator_fetch_rejects_unversioned_path(x402_provider: X402ActionProvider) -> None:
+    """The helper must reject any path lacking /v1 — the backend 404s otherwise."""
+    with pytest.raises(ValueError, match=r"/v1/"):
+        x402_provider._facilitator_fetch("/agents/credit-remaining")
+
+
+def test_no_action_uses_an_unversioned_facilitator_path(
+    x402_provider: X402ActionProvider,
+) -> None:
+    """Drive every agent-key action through a spy and assert each path starts /v1/.
+
+    Cheap end-to-end guard: if any action regresses to an unversioned path, the
+    spy captures it and this fails (instead of a silent prod 404).
+    """
+    seen: list[str] = []
+
+    def _spy(path: str, method: str = "GET", body: Any = None, timeout_seconds: float = 30) -> dict[str, Any]:
+        seen.append(path)
+        # Benign empty payload so each action runs to its fetch call.
+        return {"status": 200, "body": {}, "headers": {}}
+
+    x402_provider._facilitator_fetch = _spy  # type: ignore[method-assign]
+    w = MagicMock()
+
+    x402_provider.x402_fetch(w, {"url": "https://example.com"})
+    x402_provider.x402_get_balance(w, {})
+    x402_provider.x402_get_transactions(w, {"limit": "5"})
+    x402_provider.get_credit_remaining(w, {})
+    x402_provider.get_loan_state(w, {})
+    x402_provider.get_spend_limit(w, {})
+    x402_provider.set_spend_limit(w, {"limit_raw": "1000000"})
+    x402_provider.clear_spend_limit(w, {})
+    x402_provider.list_credit_thresholds(w, {})
+    x402_provider.register_credit_threshold(w, {"threshold_bps": 9000})
+    x402_provider.delete_credit_threshold(w, {"id": 1})
+    x402_provider.estimate_x402_cost(w, {"url": "https://example.com"})
+    x402_provider.set_allowlist_mode(w, {"mode": "both"})
+    x402_provider.get_allowlist_mode(w, {})
+    x402_provider.add_allowlist_entry(w, {"kind": "api", "match_key": "x.com", "limit_raw": "2000000"})
+    x402_provider.remove_allowlist_entry(w, {"policy_id": 1})
+    x402_provider.list_allowlist(w, {})
+
+    assert seen, "no facilitator paths were exercised"
+    offenders = [p for p in seen if not p.startswith("/v1/")]
+    assert not offenders, f"unversioned facilitator paths: {offenders}"
 
 
 # ── lazy top-level export ──────────────────────────────────────────────────────
