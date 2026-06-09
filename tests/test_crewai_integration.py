@@ -326,6 +326,50 @@ def test_zero_budget_is_hard_zero_spend() -> None:
         _usd_to_raw(-1)
 
 
+def test_usd_to_raw_rejects_over_precision() -> None:
+    """Over-precision must raise, not silently round (could over-cap or zero out)."""
+    from floe_agentkit_actions.integrations.crewai import _usd_to_raw
+
+    # Exactly 6 decimals is fine.
+    assert _usd_to_raw("1.000001") == "1000001"
+    assert _usd_to_raw(2.5) == "2500000"
+    # 7+ decimals must raise rather than round.
+    with pytest.raises(ValueError, match="6 decimals"):
+        _usd_to_raw("1.0000001")  # would round up to a HIGHER cap
+    with pytest.raises(ValueError, match="6 decimals"):
+        _usd_to_raw("0.0000001")  # would round a tiny positive budget to 0
+
+
+def test_provision_resume_restores_key_on_fresh_provider() -> None:
+    """Resume on a FRESH provider must restore the managed key before capping."""
+    from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
+
+    # Attempt 1: provider1 grants + captures the key, but set_spend_limit fails.
+    p1 = _budget_provider(key="floe_managed_alpha")
+    p1.set_spend_limit.return_value = "Error: transient"
+    budget = FloeBudget(usd_limit=5.0)
+    with pytest.raises(FloeProvisionError):
+        budget.provision(p1, MagicMock())
+    assert budget.agent_key == "floe_managed_alpha"
+    assert budget._provisioned is False
+
+    # Retry on a FRESH, unauthenticated provider (mimics budget_enabled_agent
+    # building a new X402ActionProvider each call).
+    p2 = MagicMock()
+    p2._agent_name = ""
+    p2._facilitator_url = ""      # fresh: unconfigured URL
+    p2._facilitator_api_key = ""  # fresh: unauthenticated
+
+    budget.provision(p2, MagicMock())
+
+    assert budget._provisioned is True
+    p2.grant_credit_delegation.assert_not_called()  # no second agent minted
+    # Identity restored onto the fresh provider so capping is authenticated.
+    assert p2._facilitator_api_key == "floe_managed_alpha"
+    assert p2._facilitator_url == "https://credit-api.floelabs.xyz"
+    p2.set_spend_limit.assert_called_once()
+
+
 def test_provision_raises_on_missing_facilitator_url() -> None:
     from floe_agentkit_actions.integrations.crewai import FloeBudget, FloeProvisionError
 
@@ -732,8 +776,13 @@ def test_no_action_uses_an_unversioned_facilitator_path(
 
     def _spy(path: str, method: str = "GET", body: Any = None, timeout_seconds: float = 30) -> dict[str, Any]:
         seen.append(path)
-        # Benign empty payload so each action runs to its fetch call.
-        return {"status": 200, "body": {}, "headers": {}}
+        # Terminal reservation so x402_await_settlement returns on the first
+        # poll; harmless for the other actions (they read with .get defaults).
+        return {
+            "status": 200,
+            "body": {"terminal": True, "state": "settled", "nonce": "n", "paymentAmountRaw": "0"},
+            "headers": {},
+        }
 
     x402_provider._facilitator_fetch = _spy  # type: ignore[method-assign]
     w = MagicMock()
@@ -741,6 +790,7 @@ def test_no_action_uses_an_unversioned_facilitator_path(
     x402_provider.x402_fetch(w, {"url": "https://example.com"})
     x402_provider.x402_get_balance(w, {})
     x402_provider.x402_get_transactions(w, {"limit": "5"})
+    x402_provider.x402_await_settlement(w, {"nonce": "n"})
     x402_provider.get_credit_remaining(w, {})
     x402_provider.get_loan_state(w, {})
     x402_provider.get_spend_limit(w, {})
@@ -756,6 +806,8 @@ def test_no_action_uses_an_unversioned_facilitator_path(
     x402_provider.remove_allowlist_entry(w, {"policy_id": 1})
     x402_provider.list_allowlist(w, {})
 
+    # The reservations-polling route must be covered too.
+    assert any("/v1/agents/reservations/" in p for p in seen)
     assert seen, "no facilitator paths were exercised"
     offenders = [p for p in seen if not p.startswith("/v1/")]
     assert not offenders, f"unversioned facilitator paths: {offenders}"
@@ -772,3 +824,30 @@ def test_lazy_top_level_exports() -> None:
         budget_enabled_agent,
         get_floe_crewai_tools,
     )
+
+
+_CREWAI_NAMES = {
+    "get_floe_crewai_tools",
+    "Floe402Tool",
+    "FloeLLM",
+    "FloeBudget",
+    "budget_enabled_agent",
+}
+
+
+def test_star_import_excludes_crewai_names() -> None:
+    """`from floe_agentkit_actions import *` must not pull crewai names.
+
+    Listing them in __all__ would make `import *` resolve them via the lazy
+    __getattr__ -> `import crewai` -> ImportError without the [crewai] extra.
+    """
+    import floe_agentkit_actions as pkg
+
+    assert _CREWAI_NAMES.isdisjoint(pkg.__all__)
+
+    ns: dict[str, Any] = {}
+    exec("from floe_agentkit_actions import *", ns)
+    assert _CREWAI_NAMES.isdisjoint(ns.keys())
+
+    # Still reachable via explicit import (lazy __getattr__).
+    assert pkg.FloeBudget is not None

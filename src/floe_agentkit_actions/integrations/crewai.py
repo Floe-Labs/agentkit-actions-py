@@ -70,12 +70,17 @@ def _require_crewai() -> Any:
 def _usd_to_raw(usd: float | str) -> str:
     """Convert a dollar amount to raw USDC integer units (6 decimals).
 
-    Zero is allowed (an approval-only / hard zero-spend role); only negatives
-    are rejected.
+    Zero is allowed (an approval-only / hard zero-spend role). Negatives are
+    rejected. Over-precision is rejected rather than silently rounded — rounding
+    could set a cap HIGHER than requested or round a tiny positive budget to 0.
     """
-    scaled = (Decimal(str(usd)) * USDC_SCALE).to_integral_value()
+    scaled = Decimal(str(usd)) * USDC_SCALE
     if scaled < 0:
         raise ValueError(f"amount must not be negative, got {usd!r}")
+    if scaled != scaled.to_integral_value():
+        raise ValueError(
+            f"amount must be a multiple of $0.000001 (6 decimals), got {usd!r}"
+        )
     return str(int(scaled))
 
 
@@ -374,7 +379,9 @@ class FloeBudget:
             self._provisioned = True
             return
 
-        facilitator_url = getattr(provider, "_facilitator_url", "")
+        # Tolerate a fresh provider on resume: fall back to the URL captured on
+        # a prior attempt before declaring it unconfigured.
+        facilitator_url = getattr(provider, "_facilitator_url", "") or self.facilitator_url or ""
         if not facilitator_url:
             raise FloeProvisionError(
                 "facilitator_url is not configured on the provider; cannot open a "
@@ -412,6 +419,15 @@ class FloeBudget:
             match = re.search(r"\*\*Agent ID\*\*:\s*(\d+)", result)
             if match:
                 self.agent_id = int(match.group(1))
+
+        # Restore the captured managed-agent identity onto THIS provider before
+        # capping. budget_enabled_agent builds a fresh X402ActionProvider per
+        # call, so on a resume (agent_key already set) the provider would
+        # otherwise be unauthenticated — set_spend_limit / allowlist would run
+        # with an empty key. Same private-attr pattern the reads above use.
+        assert self.agent_key  # invariant: set by grant above (or a prior attempt)
+        provider._facilitator_api_key = self.agent_key
+        provider._facilitator_url = self.facilitator_url or facilitator_url
 
         # Step 2 — cap. set_spend_limit (PUT) is idempotent, safe to re-run.
         out = provider.set_spend_limit(
@@ -619,15 +635,12 @@ def budget_enabled_agent(
             provider_key=provider_key,
         )
 
-    def _step_callback(step: Any) -> None:
-        # Record step occurrence only — no fabricated cost. Accurate per-call
-        # USDC cost is recorded as structured data by Floe402Tool(ledger=...);
-        # floe_budget_status sums those real costs.
-        state.ledger.append({"step": repr(step)})
-
+    # No default step_callback: floe_budget_status now reads authoritative
+    # numbers from the facilitator, and per-call USDC cost is recorded by
+    # Floe402Tool(ledger=...). A per-step appender would grow unbounded on long
+    # crews with nothing reading it. Callers may still pass their own.
     if llm is not None:
         agent_kwargs.setdefault("llm", llm)
-    agent_kwargs.setdefault("step_callback", _step_callback)
 
     return Agent(role=role, goal=goal, backstory=backstory, tools=tools, **agent_kwargs)
 

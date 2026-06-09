@@ -60,6 +60,12 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# NOTE: the CrewAI integration symbols (get_floe_crewai_tools, Floe402Tool,
+# FloeLLM, FloeBudget, budget_enabled_agent) are deliberately NOT in __all__.
+# They remain reachable via the lazy `__getattr__` for explicit imports
+# (`from floe_agentkit_actions import FloeBudget`), but listing them in __all__
+# would make `from floe_agentkit_actions import *` resolve them, triggering
+# `import crewai` and an ImportError when the optional [crewai] extra is absent.
 __all__ = [
     "FloeActionProvider", "FloeConfig", "floe_action_provider",
     "X402ActionProvider", "X402Config", "x402_action_provider",
@@ -67,6 +73,4 @@ __all__ = [
     "FloeAgent", "FloeAgentError",
     "FetchResult", "BalanceResult", "RawBalance", "ReservationStatus", "TransactionsResult",
     "X402FetchResult",  # deprecated alias for FetchResult
-    # CrewAI integration (optional extra — lazy).
-    "get_floe_crewai_tools", "Floe402Tool", "FloeLLM", "FloeBudget", "budget_enabled_agent",
 ]

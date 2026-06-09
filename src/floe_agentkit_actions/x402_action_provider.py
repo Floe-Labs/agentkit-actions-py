@@ -1433,8 +1433,18 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 body["matchKind"] = match_kind
             resp = self._facilitator_fetch("/v1/agents/policies", method="POST", body=body)
             if resp["status"] >= 400:
-                err = resp["body"]
-                return f"Error: {(err or {}).get('message', (err or {}).get('error', 'Unknown'))}"
+                # Backend (Hono) shapes vary: zod -> {error, details}, policy
+                # errors -> {error, message}. Pull whichever is present, matching
+                # the or-chain convention used by grant_credit_delegation.
+                err = resp["body"] or {}
+                detail = (
+                    err.get("error")
+                    or err.get("message")
+                    or err.get("detail")
+                    or err.get("details")
+                    or "Unknown"
+                )
+                return f"Error: {detail}"
             policy = resp["body"].get("policy", {})
             return "\n".join([
                 "## Allowlist Entry Added\n",
