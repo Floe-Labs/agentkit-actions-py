@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-**The spend layer for AI agents — Python SDK.** Pay any of 13,000+ x402 APIs
+**The spend layer for AI agents — Python SDK.** Pay any of 2,000+ vendor APIs
 through one endpoint, with budgets your agent can reason about. Walletless. No
 crypto required.
 
