@@ -276,6 +276,88 @@ class EstimateX402CostSchema(BaseModel):
         return v
 
 
+# ── D1 merchant allowlist schemas ─────────────────────────────────────────────
+# An allowlist "entry" is an ordinary agent policy row (kind='api' for hosts,
+# kind='vendor' for payees) that doubles as "allowed AND capped". The mode flag
+# toggles which proxy gates enforce them. 'off' (the default) = allow any vendor.
+
+_ALLOWLIST_MODES = ("off", "host", "vendor", "both")
+
+
+class SetAllowlistModeSchema(BaseModel):
+    mode: str = Field(
+        description=(
+            "Allowlist enforcement mode. 'off' = allow any vendor (default, no friction). "
+            "'host' = default-deny unlisted hosts pre-fetch. 'vendor' = default-deny unlisted "
+            "payees pre-sign. 'both' = enforce host AND payee gates."
+        ),
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in _ALLOWLIST_MODES:
+            raise ValueError(f"mode must be one of: {', '.join(_ALLOWLIST_MODES)}")
+        return v
+
+
+class GetAllowlistModeSchema(BaseModel):
+    pass
+
+
+class AddAllowlistEntrySchema(BaseModel):
+    kind: str = Field(
+        description=(
+            "'api' for a host allowlist entry (matchKey = hostname) or 'vendor' for a "
+            "payee allowlist entry (matchKey = recipient wallet address)."
+        ),
+    )
+    match_key: str = Field(
+        min_length=1,
+        max_length=255,
+        description="Host (for kind='api') or payee wallet address (for kind='vendor').",
+    )
+    limit_raw: str = Field(
+        description="Spend cap for this entry in raw USDC units (6 decimals). e.g. '1000000' = $1.",
+    )
+    match_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional matcher: 'host_exact' | 'host_suffix' (api) or 'recipient' (vendor). "
+            "Defaults server-side (api → host_suffix, vendor → recipient)."
+        ),
+    )
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str) -> str:
+        if v not in ("api", "vendor"):
+            raise ValueError("kind must be 'api' (host) or 'vendor' (payee)")
+        return v
+
+    @field_validator("limit_raw")
+    @classmethod
+    def validate_limit_raw(cls, v: str) -> str:
+        if not re.match(r"^[1-9]\d*$", v):
+            raise ValueError("limit_raw must be a positive integer (raw USDC, 6 decimals)")
+        return v
+
+    @field_validator("match_kind")
+    @classmethod
+    def validate_match_kind(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("host_exact", "host_suffix", "recipient"):
+            raise ValueError("match_kind must be host_exact | host_suffix | recipient")
+        return v
+
+
+class RemoveAllowlistEntrySchema(BaseModel):
+    policy_id: int = Field(ge=1, description="Policy id of the allowlist entry (from list_allowlist).")
+
+
+class ListAllowlistSchema(BaseModel):
+    pass
+
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 
@@ -320,6 +402,14 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
         if not self._facilitator_url:
             raise ValueError("facilitator_url not configured")
+
+        # The facilitator serves ONLY versioned routes — an unversioned path
+        # 404s in production. Enforce the invariant so a missed/new path fails
+        # loudly here instead of silently breaking end-to-end.
+        if not path.startswith("/v1/"):
+            raise ValueError(
+                f"facilitator path must be versioned (start with '/v1/'): {path!r}"
+            )
 
         url = f"{self._facilitator_url}{path}"
         parsed = urlparse(url)
@@ -733,7 +823,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_fetch(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/proxy/fetch", "POST", {
+            resp = self._facilitator_fetch("/v1/proxy/fetch", "POST", {
                 "url": args["url"],
                 "method": args.get("method", "GET"),
                 "headers": args.get("headers"),
@@ -806,7 +896,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def x402_get_balance(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/balance")
+            resp = self._facilitator_fetch("/v1/agents/balance")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"
 
@@ -879,7 +969,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         timeout_seconds = max(0.1, float(args.get("timeout_seconds", 900.0)))
 
         deadline = _time.monotonic() + timeout_seconds
-        path = f"/agents/reservations/{_quote(nonce, safe='')}"
+        path = f"/v1/agents/reservations/{_quote(nonce, safe='')}"
         last_state: Optional[str] = None
         while True:
             remaining = deadline - _time.monotonic()
@@ -952,7 +1042,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                 limit = min(parsed, 100) if parsed > 0 else 20
             except (ValueError, TypeError):
                 limit = 20
-            resp = self._facilitator_fetch(f"/agents/transactions?limit={limit}")
+            resp = self._facilitator_fetch(f"/v1/agents/transactions?limit={limit}")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', 'Unknown')}"
 
@@ -995,7 +1085,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_credit_remaining(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/credit-remaining")
+            resp = self._facilitator_fetch("/v1/agents/credit-remaining")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1028,7 +1118,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_loan_state(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/loan-state")
+            resp = self._facilitator_fetch("/v1/agents/loan-state")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1055,7 +1145,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def get_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/spend-limit")
+            resp = self._facilitator_fetch("/v1/agents/spend-limit")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1085,7 +1175,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def set_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                "/agents/spend-limit",
+                "/v1/agents/spend-limit",
                 method="PUT",
                 body={"limitRaw": args["limit_raw"]},
             )
@@ -1112,7 +1202,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def clear_spend_limit(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/spend-limit", method="DELETE")
+            resp = self._facilitator_fetch("/v1/agents/spend-limit", method="DELETE")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             return "## Spend Limit Cleared\n\nNo cap is now active."
@@ -1131,7 +1221,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     )
     def list_credit_thresholds(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
-            resp = self._facilitator_fetch("/agents/credit-thresholds")
+            resp = self._facilitator_fetch("/v1/agents/credit-thresholds")
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             subs = resp["body"].get("subscriptions", [])
@@ -1168,7 +1258,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             body: dict[str, Any] = {"thresholdBps": args["threshold_bps"]}
             if args.get("webhook_id") is not None:
                 body["webhookId"] = args["webhook_id"]
-            resp = self._facilitator_fetch("/agents/credit-thresholds", method="POST", body=body)
+            resp = self._facilitator_fetch("/v1/agents/credit-thresholds", method="POST", body=body)
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1194,7 +1284,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
     def delete_credit_threshold(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
         try:
             resp = self._facilitator_fetch(
-                f"/agents/credit-thresholds/{args['id']}",
+                f"/v1/agents/credit-thresholds/{args['id']}",
                 method="DELETE",
             )
             if resp["status"] >= 400:
@@ -1219,7 +1309,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             body: dict[str, Any] = {"url": args["url"]}
             if args.get("method"):
                 body["method"] = args["method"]
-            resp = self._facilitator_fetch("/x402/estimate", method="POST", body=body)
+            resp = self._facilitator_fetch("/v1/x402/estimate", method="POST", body=body)
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
@@ -1249,6 +1339,169 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             return "\n".join(lines)
         except Exception as e:
             return f"Error estimating cost: {e}"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # D1 MERCHANT ALLOWLIST (5) — opt-in, default-deny host (pre-fetch) and
+    # payee (post-402, pre-sign) gating. Default mode 'off' = allow any vendor.
+    # All require facilitator_api_key (agent-key auth) like the awareness actions.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── set_allowlist_mode ─────────────────────────────────────────────────
+
+    @create_action(
+        name="set_allowlist_mode",
+        description=(
+            "Set the agent's merchant-allowlist enforcement mode: off | host | vendor | both. "
+            "'off' (default) allows any vendor. 'host' blocks unlisted hosts before the first "
+            "fetch; 'vendor' blocks unlisted payees before signing; 'both' enforces both. "
+            "Allowlist entries themselves are managed with add_allowlist_entry."
+        ),
+        schema=SetAllowlistModeSchema,
+    )
+    def set_allowlist_mode(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch(
+                "/v1/agents/allowlist-mode",
+                method="PUT",
+                body={"mode": args["mode"]},
+            )
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            mode = resp["body"].get("mode", args["mode"])
+            return f"## Allowlist Mode Set\n\n**Mode**: `{mode}`"
+        except Exception as e:
+            return f"Error setting allowlist mode: {e}"
+
+    # ── get_allowlist_mode ─────────────────────────────────────────────────
+
+    @create_action(
+        name="get_allowlist_mode",
+        description="Return the agent's current merchant-allowlist enforcement mode (off | host | vendor | both).",
+        schema=GetAllowlistModeSchema,
+    )
+    def get_allowlist_mode(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/v1/agents/allowlist-mode")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            return f"## Allowlist Mode\n\n**Mode**: `{resp['body'].get('mode', 'off')}`"
+        except Exception as e:
+            return f"Error fetching allowlist mode: {e}"
+
+    # ── add_allowlist_entry ────────────────────────────────────────────────
+
+    @create_action(
+        name="add_allowlist_entry",
+        description=(
+            "Add a merchant-allowlist entry — an allowed-AND-capped policy row. Use kind='api' to "
+            "allowlist a host (matchKey = hostname) or kind='vendor' to allowlist a payee "
+            "(matchKey = recipient wallet). limit_raw caps spend against this entry (raw USDC, 6 "
+            "decimals). Enforcement only kicks in once set_allowlist_mode is host/vendor/both."
+        ),
+        schema=AddAllowlistEntrySchema,
+    )
+    def add_allowlist_entry(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            kind = args["kind"]
+            match_key = args["match_key"]
+            match_kind = args.get("match_kind")
+            # Kind-aware cross-field validation BEFORE hitting the API, so the LLM
+            # gets a clear error instead of an opaque 400. Mirrors the TS/MCP port.
+            if kind == "vendor":
+                if not re.match(_ADDRESS_PATTERN, match_key):
+                    return (
+                        "Error: vendor allowlist entries require match_key to be a "
+                        f"wallet address (0x + 40 hex chars), got {match_key!r}."
+                    )
+                if match_kind is not None and match_kind != "recipient":
+                    return (
+                        "Error: for kind='vendor', match_kind must be 'recipient' "
+                        f"(or omitted), got {match_kind!r}."
+                    )
+            elif kind == "api":
+                if match_kind is not None and match_kind not in ("host_exact", "host_suffix"):
+                    return (
+                        "Error: for kind='api', match_kind must be 'host_exact' or "
+                        f"'host_suffix' (or omitted), got {match_kind!r}."
+                    )
+            body: dict[str, Any] = {
+                "kind": kind,
+                "matchKey": match_key,
+                "limitRaw": args["limit_raw"],
+            }
+            if match_kind:
+                body["matchKind"] = match_kind
+            resp = self._facilitator_fetch("/v1/agents/policies", method="POST", body=body)
+            if resp["status"] >= 400:
+                # Backend (Hono) shapes vary: zod -> {error, details}, policy
+                # errors -> {error, message}. Pull whichever is present, matching
+                # the or-chain convention used by grant_credit_delegation.
+                err = resp["body"] or {}
+                detail = (
+                    err.get("error")
+                    or err.get("message")
+                    or err.get("detail")
+                    or err.get("details")
+                    or "Unknown"
+                )
+                return f"Error: {detail}"
+            policy = resp["body"].get("policy", {})
+            return "\n".join([
+                "## Allowlist Entry Added\n",
+                f"**#{policy.get('id')}** {policy.get('kind')} — `{policy.get('matchKey')}`",
+                f"**Cap**: {format_token_amount(int(policy.get('limitRaw', args['limit_raw'])), 6, 'USDC')}",
+            ])
+        except Exception as e:
+            return f"Error adding allowlist entry: {e}"
+
+    # ── remove_allowlist_entry ─────────────────────────────────────────────
+
+    @create_action(
+        name="remove_allowlist_entry",
+        description="Remove (revoke) a merchant-allowlist entry by policy id (from list_allowlist).",
+        schema=RemoveAllowlistEntrySchema,
+    )
+    def remove_allowlist_entry(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch(
+                f"/v1/agents/policies/{args['policy_id']}",
+                method="DELETE",
+            )
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            return f"## Allowlist Entry Removed\n\nEntry #{args['policy_id']} revoked."
+        except Exception as e:
+            return f"Error removing allowlist entry: {e}"
+
+    # ── list_allowlist ─────────────────────────────────────────────────────
+
+    @create_action(
+        name="list_allowlist",
+        description=(
+            "List the agent's merchant-allowlist entries (host 'api' and payee 'vendor' policies) "
+            "with their spend caps. Does not include session/task spend policies."
+        ),
+        schema=ListAllowlistSchema,
+    )
+    def list_allowlist(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/v1/agents/policies")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            policies = resp["body"].get("policies", [])
+            entries = [p for p in policies if p.get("kind") in ("api", "vendor")]
+            if not entries:
+                return "## Allowlist\n\nNo host/payee allowlist entries."
+            lines = ["## Allowlist\n"]
+            for p in entries:
+                cap = format_token_amount(int(p.get("limitRaw", "0")), 6, "USDC")
+                lines.append(
+                    f"**#{p.get('id')}** {p.get('kind')} — `{p.get('matchKey')}` "
+                    f"(matchKind {p.get('matchKind', '—')}) — cap {cap}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing allowlist: {e}"
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
