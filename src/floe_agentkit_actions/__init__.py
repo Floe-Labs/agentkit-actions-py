@@ -9,6 +9,8 @@ Usage::
 
 from __future__ import annotations
 
+from typing import Any
+
 from .action_provider import FloeActionProvider
 from .floe_agent import (
     BalanceResult,
@@ -36,6 +38,34 @@ def floe_action_provider(config: FloeConfig | None = None) -> FloeActionProvider
     return FloeActionProvider(config)
 
 
+# CrewAI integration symbols are re-exported lazily (PEP 562) so `crewai`
+# stays an optional extra — importing this package never requires it until one
+# of these names is actually accessed.
+_CREWAI_EXPORTS = frozenset(
+    {
+        "get_floe_crewai_tools",
+        "Floe402Tool",
+        "FloeLLM",
+        "FloeBudget",
+        "budget_enabled_agent",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _CREWAI_EXPORTS:
+        from .integrations import crewai as _crewai
+
+        return getattr(_crewai, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# NOTE: the CrewAI integration symbols (get_floe_crewai_tools, Floe402Tool,
+# FloeLLM, FloeBudget, budget_enabled_agent) are deliberately NOT in __all__.
+# They remain reachable via the lazy `__getattr__` for explicit imports
+# (`from floe_agentkit_actions import FloeBudget`), but listing them in __all__
+# would make `from floe_agentkit_actions import *` resolve them, triggering
+# `import crewai` and an ImportError when the optional [crewai] extra is absent.
 __all__ = [
     "FloeActionProvider", "FloeConfig", "floe_action_provider",
     "X402ActionProvider", "X402Config", "x402_action_provider",

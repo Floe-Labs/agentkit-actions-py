@@ -4,19 +4,21 @@ Validates that both providers export the expected number of actions, and
 asserts that the Python port remains at full parity with the TypeScript
 reference (`agentkit-actions`).
 
-Current state (May 2026 — v0.4 managed credit-line + FLO-567 settlement helper):
+Current state (June 2026 — v0.5 CrewAI integration + D1 merchant allowlist):
 
 - TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=17 = 47
-- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=17 = 47
+- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=22 = 52
 
 X402ActionProvider has 6 credit-delegation actions (grant/revoke/check +
 x402_fetch + x402_get_balance + x402_get_transactions) + 9 agent-awareness
 actions (get_credit_remaining, get_loan_state, {get,set,clear}_spend_limit,
 {list,register,delete}_credit_threshold, estimate_x402_cost) + 1 managed
 credit-line action (open_credit_line) added in v0.4 + 1 settlement helper
-(x402_await_settlement) added in FLO-567.
+(x402_await_settlement) added in FLO-567 + 5 D1 merchant-allowlist actions
+({set,get}_allowlist_mode, {add,remove}_allowlist_entry, list_allowlist).
 
-Parity maintained — PARITY_GAP = 0.
+Forward drift: Python leads TS by 5 (the D1 allowlist actions). The TS port is
+plan deliverable D9 and ships as its own PR. PARITY_GAP = -5 until D9 lands.
 
 If either provider's action count changes, update the constants below.
 If parity breaks (Python drifts behind TypeScript), fix the port — do not
@@ -34,12 +36,19 @@ from floe_agentkit_actions.x402_action_provider import X402ActionProvider
 #       floe-labs-docs if the combined total changed
 #   (b) Someone removed an action — investigate whether that was intentional
 FLOE_PROVIDER_ACTION_COUNT = 30  # full TS parity: 23 base + 7 credit-facility
-X402_PROVIDER_ACTION_COUNT = 17  # 6 x402 delegation + 9 agent-awareness + 1 open_credit_line (v0.4) + 1 x402_await_settlement (FLO-567)
-TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 47
+X402_PROVIDER_ACTION_COUNT = 22  # 6 x402 delegation + 9 agent-awareness + 1 open_credit_line (v0.4) + 1 x402_await_settlement (FLO-567) + 5 D1 merchant-allowlist
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 52
 
-# The TypeScript reference port. Gap = TS - Python. Closed.
+# The TypeScript reference port. Gap = TS - Python.
+#
+# INTENTIONAL FORWARD DRIFT: the 5 D1 merchant-allowlist actions
+# (set/get_allowlist_mode, add/remove_allowlist_entry, list_allowlist) landed
+# in Python FIRST as part of the CrewAI integration (crewai-floe). The
+# TypeScript port is tracked separately as plan deliverable D9 and ships as its
+# own PR. Until D9 lands, Python is ahead by 5 — this is expected, not drift to
+# "fix". When D9 merges, bump TS_REFERENCE_TOTAL to 52 and PARITY_GAP back to 0.
 TS_REFERENCE_TOTAL = 47
-PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0
+PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # -5 (Python ahead, pending D9)
 
 
 def _count_actions(provider_cls) -> int:

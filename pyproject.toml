@@ -50,6 +50,9 @@ langchain = [
     "coinbase-agentkit-langchain>=0.1.0",
     "langchain-openai>=0.1.0",
 ]
+crewai = [
+    "crewai>=1.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
