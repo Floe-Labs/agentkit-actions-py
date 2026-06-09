@@ -5,35 +5,35 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-**Credit and payments for AI agent developers — Python SDK. No crypto required.**
+**The spend layer for AI agents — Python SDK.** Pay any of 13,000+ x402 APIs
+through one endpoint, with budgets your agent can reason about. Walletless. No
+crypto required.
 
-1. **Sign up with email + a funding source.** Card, Apple Pay, Google Pay, or bank transfer. Floe provisions your wallets in the background — no MetaMask, no seed phrase, no gas token.
-2. **Floe issues an x402 credit line to your agent's wallet.** Set spending controls — per-call cap, daily limit, allowed destinations.
-3. **Your agent pays vendors per-call; you get real-time visibility.** Every call is a typed receipt: target URL, amount, status, time. Reconcile, alert, or revoke from the dashboard.
-
-`floe-agentkit-actions` is the official Python SDK. The high-level `FloeAgent` client gives you the three-step loop in code; the lower-level action providers expose 45 AgentKit actions for self-custody and framework integrations, at full parity with the TypeScript [`floe-agent`](https://github.com/Floe-Labs/agentkit-actions) package.
-
-- **`FloeAgent(api_key=…)`** — runtime client. No wallet, no chain knowledge. `agent.fetch(url)`, `agent.balance()`, dollars in / dollars out.
-- **`floe_action_provider()`** + **`x402_action_provider()`** — 45 AgentKit actions across the lending and x402 stacks.
-
-> Package name note: the Python distribution is `floe-agentkit-actions` (TS distribution is `floe-agent`). The action surface is identical.
-
-> **$2 free credit (~200 API calls).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
-
-> **Proof points:** 3,000+ secured working capital lines issued · zero defaults · 13,000+ x402 APIs reachable via the Floe proxy.
+[Website](https://floelabs.xyz) · [Docs](https://floe-labs.gitbook.io/docs) · [Dashboard](https://dev-dashboard.floelabs.xyz) · [TypeScript SDK](https://github.com/Floe-Labs/agentkit-actions)
 
 ---
 
-## The Floe Stack (what this SDK covers)
+## What it does
 
-| # | Component | Status | Backed by |
-|---|---|---|---|
-| 01 | **Agent Wallet** | `GA` | Any `WalletProvider` (CDP, Privy, Viem) + ERC-8004 identity |
-| 02 | **Fiat on-ramp** | `GA` (dashboard-driven) | Coinbase onramp via the [Floe dashboard](https://dev-dashboard.floelabs.xyz). Fiat off-ramp `Preview`. |
-| 03 | **Secured working capital** | `GA` | `instant_borrow`, `repay_and_reborrow`, `check_credit_status`, `request_credit`, `manual_match_credit` + 15 lending primitives |
-| 04 | **Unsecured working capital** | `Preview` | Receivables + chain-of-thought underwriting — email [hello@floelabs.xyz](mailto:hello@floelabs.xyz) for the design partner program |
-| 05 | **x402 payment facilitator** | `GA` | `grant_credit_delegation`, `revoke_credit_delegation`, `check_credit_delegation`, `x402_fetch`, `x402_get_balance`, `x402_get_transactions` |
-| 06 | **Credit & trust bureau** | Reader `Beta` · Writer `Preview` | `list_credit_thresholds`, `register_credit_threshold`, `delete_credit_threshold` today. Portable ERC-8004 read API in Beta. |
+Your agent calls paid APIs — LLMs, voice, search, data. Floe is the spend layer
+in front of those calls:
+
+- **One endpoint, many vendors.** Pay any x402 API through the Floe facilitator. No per-vendor accounts or keys.
+- **Budgets the agent can reason about.** Ask "do I have budget? is this call worth it?" *before* paying — not after.
+- **Programmable spend controls.** Per-call caps, daily limits, allowed destinations, session ceilings — enforced server-side, before money moves.
+- **Walletless.** Email + a funding source. Floe provisions wallets in the background — no MetaMask, no seed phrase, no gas. The stablecoin rails are invisible.
+- **Real-time visibility.** Every call is a typed receipt: target, amount, status, time. Reconcile, alert, or revoke from the dashboard.
+
+Two layers in one package:
+
+| Layer | What it is | For |
+|---|---|---|
+| **`FloeAgent`** ⭐ | High-level runtime client. No wallet, no chain knowledge. Dollars in, dollars out (`agent.fetch(url)`, `agent.balance()`). | Most agent developers |
+| **Action providers** | 47 AgentKit actions for self-custody, lending, and framework integrations — full parity with the TypeScript `floe-agent` package. | Self-custody / on-chain use cases |
+
+> **Package name:** the Python distribution is `floe-agentkit-actions` (the TypeScript distribution is `floe-agent`). The action surface is identical.
+
+> **$2 free credit (~200 API calls).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
 
 ---
 
@@ -51,7 +51,7 @@
 
 ---
 
-## Installation
+## Install
 
 ```bash
 pip install floe-agentkit-actions
@@ -134,7 +134,7 @@ print(result)
 
 ---
 
-## Actions (45 total)
+## Actions (47 total)
 
 ### Read Actions (8)
 
@@ -175,12 +175,14 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 | `flash_arb` | Execute a flash arb via a deployed FlashArbReceiver |
 | `get_flash_arb_balance` | Check accumulated profit in a FlashArbReceiver |
 
-### Credit Facility Actions (5)
+### Credit Facility Actions (7)
 
 | Action | Description |
 |--------|-------------|
 | `instant_borrow` | Borrow USDC instantly — auto-selects best lender, handles approval + register + match in one call |
 | `repay_and_reborrow` | Repay an existing loan and instantly borrow again. If reborrow fails, repayment still succeeds |
+| `repay_credit` | Repay an open credit line (full or partial) |
+| `renew_credit_line` | Roll an existing credit line into a fresh term |
 | `check_credit_status` | Loan health, balance, accrued interest, time to expiry, early repayment terms |
 | `request_credit` | Browse available credit offers — rates, amounts, durations |
 | `manual_match_credit` | Match with a specific lend intent (register + match) |
@@ -193,15 +195,17 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 | `check_flash_arb_readiness` | Check environment readiness (fee, liquidity, oracle, router) |
 | `verify_flash_arb_receiver` | Verify a receiver's owner and immutable config |
 
-### x402 Credit Delegation Actions (6)
+### x402 Credit Delegation Actions (8)
 
 | Action | Description |
 |--------|-------------|
 | `grant_credit_delegation` | Delegate borrowing authority to a facilitator (sets operator + collateral approval) |
+| `open_credit_line` | Open a USDC/USDC credit line for the delegated agent |
 | `revoke_credit_delegation` | Revoke a facilitator's borrowing authority |
 | `check_credit_delegation` | Check delegation status (approved, limits, borrowed, expiry) |
 | `x402_fetch` | Fetch a URL with automatic x402 payment handling |
 | `x402_get_balance` | Check x402 credit balance |
+| `x402_await_settlement` | Poll a pending x402 reservation until it settles |
 | `x402_get_transactions` | List recent x402 payment transactions |
 
 ### Agent Awareness Actions (9)
