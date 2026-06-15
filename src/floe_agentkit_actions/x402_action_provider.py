@@ -645,6 +645,26 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
         except Exception as e:  # noqa: BLE001
             return f"Error opening credit line: {e}"
 
+    @staticmethod
+    def _normalize_signature(signature: str) -> str:
+        """Normalize a wallet signature to a 0x-prefixed hex string.
+
+        Some wallet providers (e.g. coinbase-agentkit >=0.7) return the
+        signature without a 0x prefix; the credit API rejects that as an
+        "Invalid signature format." This validates the value is a non-empty
+        hex string and normalizes it, failing fast with a clear error.
+        """
+        if not signature:
+            raise ValueError("Wallet provider returned empty signature")
+        body = signature[2:] if signature.startswith("0x") else signature
+        try:
+            int(body, 16)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid signature format (not hex): {signature[:20]}..."
+            ) from e
+        return signature if signature.startswith("0x") else f"0x{signature}"
+
     def _signed_developer_get(
         self,
         wallet_provider: EvmWalletProvider,
@@ -658,12 +678,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             raise ValueError("facilitator_url not configured")
         timestamp = str(int(time.time()))
         message = f"Floe Credit API\nTimestamp: {timestamp}"
-        signature = wallet_provider.sign_message(message)
-        # Some wallet providers (e.g. coinbase-agentkit >=0.7) return the
-        # signature without a 0x prefix; the credit API rejects that as an
-        # "Invalid signature format." Normalize to a 0x-prefixed hex string.
-        if not signature.startswith("0x"):
-            signature = f"0x{signature}"
+        signature = self._normalize_signature(wallet_provider.sign_message(message))
         address = wallet_provider.get_address()
         headers = {
             "Content-Type": "application/json",
@@ -701,12 +716,7 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
 
         timestamp = str(int(time.time()))
         message = f"Floe Credit API\nTimestamp: {timestamp}"
-        signature = wallet_provider.sign_message(message)
-        # Some wallet providers (e.g. coinbase-agentkit >=0.7) return the
-        # signature without a 0x prefix; the credit API rejects that as an
-        # "Invalid signature format." Normalize to a 0x-prefixed hex string.
-        if not signature.startswith("0x"):
-            signature = f"0x{signature}"
+        signature = self._normalize_signature(wallet_provider.sign_message(message))
         address = wallet_provider.get_address()
         headers = {
             "Content-Type": "application/json",
