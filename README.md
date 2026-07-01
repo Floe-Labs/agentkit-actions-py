@@ -134,7 +134,7 @@ print(result)
 
 ---
 
-## Actions (47 total)
+## Actions (54 total)
 
 ### Read Actions (8)
 
@@ -225,6 +225,27 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 | `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
 
 > **Decision-loop pattern:** call `estimate_x402_cost` → inspect the returned string for `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
+
+### Merchant Allowlist Actions (5)
+
+Opt-in, default-deny restriction on which destinations an agent may pay.
+
+| Action | Description |
+|--------|-------------|
+| `set_allowlist_mode` | Set enforcement mode: off \| host \| vendor \| both |
+| `get_allowlist_mode` | Read the current enforcement mode |
+| `add_allowlist_entry` | Add an allowed-and-capped host or payee entry |
+| `remove_allowlist_entry` | Remove an allowlist entry by policy id |
+| `list_allowlist` | List the agent's allowlist entries with spend caps |
+
+### Floe Inference Actions (2)
+
+Keyless pay-as-you-go LLM/voice gateway (FLO-602). Browse and price before spending.
+
+| Action | Description |
+|--------|-------------|
+| `list_inference_models` | List Floe Inference models (id, modality, context window) |
+| `estimate_inference_cost` | Estimate the USDC cost of a call for a model + usage vector (no call) |
 
 ---
 

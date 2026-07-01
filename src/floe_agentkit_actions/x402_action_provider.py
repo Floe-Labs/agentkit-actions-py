@@ -358,6 +358,32 @@ class ListAllowlistSchema(BaseModel):
     pass
 
 
+# ── Floe Inference schemas (FLO-602) ──────────────────────────────────────────
+# Keyless pay-as-you-go LLM/voice gateway. list_inference_models browses the
+# catalog; estimate_inference_cost prices a usage vector before spending.
+
+
+class ListInferenceModelsSchema(BaseModel):
+    pass
+
+
+class EstimateInferenceCostSchema(BaseModel):
+    model: str = Field(
+        min_length=1,
+        max_length=128,
+        description='Model id from list_inference_models, e.g. "openai/gpt-4o" or "elevenlabs/eleven-turbo-v2.5".',
+    )
+    input_tokens: int | None = Field(default=None, ge=0, description="Prompt tokens (text models).")
+    output_tokens: int | None = Field(default=None, ge=0, description="Completion tokens (text models).")
+    cached_input_tokens: int | None = Field(
+        default=None, ge=0, description="Cached prompt tokens billed at the cached rate (text models)."
+    )
+    characters: int | None = Field(default=None, ge=0, description="Characters of input text (TTS models).")
+    audio_seconds: int | None = Field(default=None, ge=0, description="Seconds of audio (STT models).")
+    audio_input_tokens: int | None = Field(default=None, ge=0, description="Input audio tokens (realtime voice).")
+    audio_output_tokens: int | None = Field(default=None, ge=0, description="Output audio tokens (realtime voice).")
+
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 
@@ -1357,6 +1383,82 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
                     f"**Would exceed session spend-limit?**: {'YES — DO NOT CALL' if r.get('willExceedSpendLimit') else 'no'}",
                 ])
             return "\n".join(lines)
+        except Exception as e:
+            return f"Error estimating cost: {e}"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # FLOE INFERENCE (2) — FLO-602 keyless pay-as-you-go LLM/voice gateway.
+    # Browse the model catalog and price a call before spending. Both require
+    # facilitator_api_key (agent-key auth) like the awareness actions.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── list_inference_models ──────────────────────────────────────────────
+
+    @create_action(
+        name="list_inference_models",
+        description=(
+            "List the models on Floe Inference — the keyless pay-as-you-go LLM/voice gateway. "
+            "Returns OpenAI-compatible model ids (e.g. 'openai/gpt-4o'), their modality (text | "
+            "embedding | tts | stt | realtime), and context window. Use an id with the OpenAI-"
+            "compatible endpoints, or price a call first with estimate_inference_cost."
+        ),
+        schema=ListInferenceModelsSchema,
+    )
+    def list_inference_models(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            resp = self._facilitator_fetch("/v1/models")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            models = resp["body"].get("data", [])
+            if not models:
+                return "No models are currently available on Floe Inference."
+            lines = ["## Floe Inference Models\n", f"**{len(models)}** available:\n"]
+            for m in models:
+                ctx = f" · {m['context_window']:,} ctx" if m.get("context_window") else ""
+                lines.append(f"- `{m.get('id')}` ({m.get('modality', 'text')}{ctx})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing models: {e}"
+
+    # ── estimate_inference_cost ────────────────────────────────────────────
+
+    @create_action(
+        name="estimate_inference_cost",
+        description=(
+            "Estimate the USDC cost of a Floe Inference call for a model + usage vector, WITHOUT "
+            "making the call or touching balance. Returns the cheapest priceable source (rail, "
+            "provider, margin, cost). Provide only the units the model bills: text uses input_tokens/"
+            "output_tokens (+cached_input_tokens); TTS uses characters; STT uses audio_seconds; "
+            "realtime voice uses audio_input_tokens/audio_output_tokens. Use BEFORE inference to gate."
+        ),
+        schema=EstimateInferenceCostSchema,
+    )
+    def estimate_inference_cost(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            body: dict[str, Any] = {"model": args["model"]}
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "characters",
+                "audio_seconds",
+                "audio_input_tokens",
+                "audio_output_tokens",
+            ):
+                if args.get(key) is not None:
+                    body[key] = args[key]
+            resp = self._facilitator_fetch("/v1/estimate", method="POST", body=body)
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            margin_pct = d.get("margin_bps", 0) / 100
+            return "\n".join([
+                "## Floe Inference Estimate\n",
+                f"**Model**: {d.get('model')}",
+                f"**Source**: {d.get('provider')} ({d.get('rail')})",
+                f"**Cost**: ${d.get('cost_usdc')} USDC",
+                f"**Upstream**: ${d.get('upstream_cost_usdc', '—')} USDC · **Margin**: {margin_pct:.2f}%",
+            ])
         except Exception as e:
             return f"Error estimating cost: {e}"
 
