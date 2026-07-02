@@ -32,6 +32,10 @@ dependencies = [
     "eth-utils>=5.0.0",
     "eth-account>=0.13.0",
     "keyring>=24.0.0",
+    # Pin the transitive `solana` dep below 0.40: solana-py 0.40.0 removed the
+    # synchronous `solana.rpc.api` module, which coinbase-agentkit 0.7.4 imports
+    # at load time -> `ModuleNotFoundError: No module named 'solana.rpc.api'`.
+    "solana>=0.36,<0.40",
 ]
 
 [project.urls]
