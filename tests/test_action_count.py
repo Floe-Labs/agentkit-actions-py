@@ -1,12 +1,12 @@
 """Exported action count smoke test.
 
 Validates that both providers export the expected number of actions, and
-asserts that the Python port remains at full parity with the TypeScript
-reference (`agentkit-actions`).
+documents the current gap against the TypeScript reference
+(`agentkit-actions`).
 
-Current state (June 2026 — v0.5 CrewAI integration + D1 merchant allowlist):
+Current state (July 2026 — FLO-602 inference actions, Python first):
 
-- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=24 = 54
+- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=22 = 52
 - Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=24 = 54
 
 X402ActionProvider has 6 credit-delegation actions (grant/revoke/check +
@@ -18,12 +18,13 @@ credit-line action (open_credit_line) added in v0.4 + 1 settlement helper
 ({set,get}_allowlist_mode, {add,remove}_allowlist_entry, list_allowlist) + 2
 FLO-602 inference actions (list_inference_models, estimate_inference_cost).
 
-Full parity: both ports are at 54 (the allowlist + inference actions have landed
-in TypeScript too). PARITY_GAP = 0.
+Python is currently 2 actions AHEAD of TypeScript: the FLO-602 inference
+actions (list_inference_models, estimate_inference_cost) have not landed in
+the TypeScript port yet. PARITY_GAP = -2 until they do.
 
 If either provider's action count changes, update the constants below.
-If parity breaks, fix the port — do not just bump PARITY_GAP to hide the drift.
-The docs at floe-labs-docs claim "54 actions in both TypeScript and Python" — keep that true.
+If parity breaks further, fix the port — do not just bump PARITY_GAP to hide
+the drift. Update floe-labs-docs whenever the user-facing counts change.
 """
 
 from __future__ import annotations
@@ -41,13 +42,13 @@ TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 
 
 # The TypeScript reference port. Gap = TS - Python.
 #
-# FULL PARITY: the 5 merchant-allowlist actions (D9) AND the 2 FLO-602 inference
-# actions (list_inference_models, estimate_inference_cost) have now landed in the
-# TypeScript port as well — verified: agentkit-actions x402ActionProvider exports
-# 24 @CreateAction decorators + 30 in floeActionProvider = 54, identical to Python.
-# So the ports are in lockstep at 54 and the parity gap is 0.
-TS_REFERENCE_TOTAL = 54
-PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0 (TS and Python both at 54)
+# Python is 2 actions ahead: the 2 FLO-602 inference actions
+# (list_inference_models, estimate_inference_cost) have NOT landed in the
+# TypeScript port yet — verified: agentkit-actions x402ActionProvider exports
+# 22 @CreateAction decorators + 30 in floeActionProvider = 52 vs 54 in Python.
+# Once they land in TypeScript, bump TS_REFERENCE_TOTAL to 54 (gap back to 0).
+TS_REFERENCE_TOTAL = 52
+PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # -2 (Python ahead of TS)
 
 
 def _count_actions(provider_cls) -> int:
@@ -88,11 +89,11 @@ def test_total_action_count_matches_current_python_state() -> None:
 
 
 def test_python_port_parity_gap_is_documented() -> None:
-    """Assert that the documented Python/TypeScript parity gap stays closed.
+    """Assert that the documented Python/TypeScript parity gap stays accurate.
 
-    As of commit 854fd92 the gap is 0. If a new action lands in TypeScript
-    ahead of Python (or vice versa), update the constants at the top of
-    this file AND floe-labs-docs in the same PR.
+    As of the FLO-602 PR the gap is -2 (Python ahead). If a new action lands
+    in TypeScript ahead of Python (or vice versa), update the constants at
+    the top of this file AND floe-labs-docs in the same PR.
     """
     total = _count_actions(FloeActionProvider) + _count_actions(X402ActionProvider)
     gap = TS_REFERENCE_TOTAL - total

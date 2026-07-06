@@ -1451,13 +1451,12 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             if resp["status"] >= 400:
                 return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
             d = resp["body"]
-            margin_pct = d.get("margin_bps", 0) / 100
             return "\n".join([
                 "## Floe Inference Estimate\n",
-                f"**Model**: {d.get('model')}",
-                f"**Source**: {d.get('provider')} ({d.get('rail')})",
-                f"**Cost**: ${d.get('cost_usdc')} USDC",
-                f"**Upstream**: ${d.get('upstream_cost_usdc', '—')} USDC · **Margin**: {margin_pct:.2f}%",
+                f"**Model**: {d.get('model', args['model'])}",
+                f"**Source**: {d.get('provider', '—')} ({d.get('rail', '—')})",
+                f"**Cost**: ${d.get('cost_usdc', '—')} USDC",
+                f"**Upstream**: ${d.get('upstream_cost_usdc', '—')} USDC · **Margin**: {format_bps(d.get('margin_bps', 0))}",
             ])
         except Exception as e:
             return f"Error estimating cost: {e}"
