@@ -45,7 +45,7 @@ Two layers in one package:
 | LangChain | `GA` | `from floe_agentkit_actions.integrations.langchain import get_floe_langchain_tools` |
 | OpenAI Agents SDK | `Beta` | `from floe_agentkit_actions.integrations.openai_agents import get_floe_openai_tools` |
 | Claude Desktop / Claude Code / Cursor | `GA` | Via [floe-mcp-server](https://github.com/Floe-Labs/floe-mcp-server) |
-| CrewAI | `Beta` | Via MCP server (see [floe-examples](https://github.com/Floe-Labs/floe-examples)) |
+| CrewAI | `Beta` | Via MCP server (see [floe-cookbook](https://github.com/Floe-Labs/floe-cookbook)) |
 | ElizaOS | `Preview` | MCP fallback today |
 | Plain HTTP / REST | `GA` | Any framework — call the [REST API](https://floe-labs.gitbook.io/docs/developers/credit-api) |
 
@@ -290,7 +290,7 @@ Or run a local MCP server — see [floe-mcp-server](https://github.com/Floe-Labs
 
 ### CrewAI (`Beta`)
 
-CrewAI agents consume the Floe stack via MCP today. A runnable crew is available in [floe-examples/crewai-demo](https://github.com/Floe-Labs/floe-examples).
+CrewAI agents consume the Floe stack via MCP today. A runnable crew is available in [floe-cookbook/crewai-demo](https://github.com/Floe-Labs/floe-cookbook).
 
 ---
 
@@ -357,7 +357,7 @@ pytest
 - [Documentation](https://floe-labs.gitbook.io/docs)
 - [TypeScript counterpart (`floe-agent`)](https://github.com/Floe-Labs/agentkit-actions)
 - [MCP server (`@floelabs/mcp-server`)](https://github.com/Floe-Labs/floe-mcp-server)
-- [End-to-end examples](https://github.com/Floe-Labs/floe-examples)
+- [End-to-end examples](https://github.com/Floe-Labs/floe-cookbook)
 
 ## License
 
