@@ -10,11 +10,9 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 keywords = ["defi", "lending", "agentkit", "coinbase", "ai-agent", "floe", "base"]
-
-[[project.authors]]
-name = "Floe Labs"
-email = "hello@floelabs.xyz"
-
+authors = [
+    { name = "Floe Labs", email = "hello@floelabs.xyz" },
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
