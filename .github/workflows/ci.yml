@@ -23,7 +23,6 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install "coinbase-agentkit>=0.7.0" "web3>=7.0.0" "pydantic>=2.0.0" "eth-utils>=5.0.0"
           pip install -e ".[dev]"
           python -c "import coinbase_agentkit, pydantic, eth_utils; print('deps ok')"
       - run: ruff check src/
