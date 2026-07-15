@@ -22,13 +22,15 @@ import json
 import math
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypedDict
 
 DEFAULT_BASE_URL = "https://credit-api.floelabs.xyz"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
+MAX_TAG_LENGTH = 128
 USDC_DECIMALS = 6
 USDC_SCALE = 10**USDC_DECIMALS
 
@@ -80,6 +82,54 @@ def _raw_to_dollars(raw: Optional[str]) -> float:
         return 0.0
 
 
+class BudgetAdvisoryTightest(TypedDict, total=False):
+    """The tightest active spend cap, as reported by the server (snake_case
+    wire shape verbatim — mirrors the TS SDK's ``BudgetAdvisory``)."""
+
+    scope: str  # credit_line | session | task | api | vendor | key
+    match: Optional[str]
+    used_bps: int  # 0..10000
+    remaining_raw: str  # raw 6-decimal USDC integer string
+    window_kind: Optional[str]  # once | rolling | session | credit_line | None
+    window_resets_at: str  # ISO-8601; rolling windows only
+
+
+class BudgetAdvisory(TypedDict, total=False):
+    """Parsed ``X-Floe-Budget-Advisory`` response header — how close the agent
+    is to the tightest spend cap Floe enforces, so it can taper or escalate
+    *before* the 402 hard-stop fires."""
+
+    near_limit: bool  # present only when the operator configured a threshold
+    tightest: BudgetAdvisoryTightest
+
+
+def _parse_budget_advisory(headers: dict[str, str]) -> Optional[BudgetAdvisory]:
+    """Defensively parse ``x-floe-budget-advisory`` — a malformed or absent
+    header yields ``None``, never an exception (mirrors the TS SDK)."""
+    raw = headers.get("x-floe-budget-advisory")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _validate_tag(name: str, value: str) -> str:
+    """Validate a ``task_id``/``action_id`` attribution tag: 1..128 chars
+    after stripping. The server lowercases; the stripped value passes through
+    unchanged."""
+    trimmed = value.strip()
+    if len(trimmed) == 0 or len(trimmed) > MAX_TAG_LENGTH:
+        raise FloeAgentError(
+            f"{name} must be 1..{MAX_TAG_LENGTH} characters after stripping "
+            f"(got {len(trimmed)}).",
+            400,
+        )
+    return trimmed
+
+
 @dataclass
 class FetchResult:
     status: int
@@ -91,10 +141,31 @@ class FetchResult:
     """True when this was a cached replay against the same idempotency key."""
     cost_raw: Optional[str] = None
     """Raw 6-decimal USDC integer string. Advanced — prefer ``cost`` for display."""
+    budget_advisory: Optional[BudgetAdvisory] = None
+    """Parsed ``X-Floe-Budget-Advisory`` (proximity to the tightest spend cap).
+
+    ``None`` when the server flag is off, the facilitator predates the
+    header, or the header is malformed."""
 
 
 # Backwards compatibility alias.
 X402FetchResult = FetchResult
+
+
+@dataclass
+class OutcomeResult:
+    """The stored outcome for a tagged action, as returned by
+    :meth:`FloeAgent.report_outcome` (FLO-633). Caller-supplied verbatim —
+    Floe never judges quality."""
+
+    action_id: str
+    status: str  # success | failure | partial | unknown
+    score_bps: Optional[int] = None
+    """Optional quality score, basis points 0..10000 (e.g. 8500 = 85%)."""
+    note: Optional[str] = None
+    report_count: int = 1
+    """How many times this action's outcome has been (re)reported."""
+    reported_at: Optional[str] = None
 
 
 @dataclass
@@ -227,11 +298,21 @@ class FloeAgent:
         headers: Optional[dict[str, str]] = None,
         body: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        task_id: Optional[str] = None,
+        action_id: Optional[str] = None,
     ) -> FetchResult:
         """Call any URL.
 
         If the API is x402-gated, payment happens automatically (debited
         from your prepaid balance). Free URLs pass through unchanged.
+
+        ``task_id`` (≤128 chars, lowercased server-side) is sent as
+        ``X-Floe-Task-Id`` — spend accrues against any per-task budget with
+        that id. ``action_id`` is sent as ``X-Floe-Action-Id`` — it attributes
+        this call's cost to one decision/action of your run so it can be
+        joined against the outcome you later report via
+        :meth:`report_outcome` (cost-per-action eval). Both ride on the Floe
+        request itself, not on the target's headers.
         """
         extra: dict[str, str] = {}
         if idempotency_key is not None:
@@ -245,6 +326,10 @@ class FloeAgent:
                     400,
                 )
             extra["Idempotency-Key"] = idempotency_key
+        if task_id is not None:
+            extra["X-Floe-Task-Id"] = _validate_tag("task_id", task_id)
+        if action_id is not None:
+            extra["X-Floe-Action-Id"] = _validate_tag("action_id", action_id)
 
         payload: dict[str, Any] = {"url": url, "method": method}
         if headers is not None:
@@ -289,10 +374,60 @@ class FloeAgent:
             cost=_raw_to_dollars(cost_raw),
             cost_raw=cost_raw,
             idempotent_replay=response_headers.get("x-floe-idempotent-replay") == "true",
+            budget_advisory=_parse_budget_advisory(response_headers),
         )
 
     # Backwards compatibility alias — `fetch` is the recommended name.
     x402_fetch = fetch
+
+    def report_outcome(
+        self,
+        action_id: str,
+        status: Literal["success", "failure", "partial", "unknown"],
+        score_bps: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> OutcomeResult:
+        """Report how a tagged action turned out, closing the spend ↔ outcome
+        loop (FLO-633). Pair with ``fetch(..., action_id=...)``::
+
+            agent.fetch(url, action_id="summarize-doc-42")
+            agent.report_outcome("summarize-doc-42", "success", score_bps=9000)
+
+        Your operator's dashboard then shows cost-per-action next to your
+        outcome. Re-reporting the same action replaces the previous signal
+        (``report_count`` increments). Floe never judges quality — the
+        status/score are yours, stored verbatim.
+        """
+        tag = _validate_tag("action_id", action_id)
+        if score_bps is not None and (
+            not isinstance(score_bps, int)
+            or isinstance(score_bps, bool)
+            or score_bps < 0
+            or score_bps > 10000
+        ):
+            raise FloeAgentError(
+                f"score_bps must be an integer 0..10000 (got {score_bps}).", 400
+            )
+        payload: dict[str, Any] = {"status": status}
+        if score_bps is not None:
+            payload["scoreBps"] = score_bps
+        if note is not None:
+            payload["note"] = note
+        data = self._json_request(
+            "POST",
+            f"/v1/agents/actions/{urllib.parse.quote(tag, safe='')}/outcome",
+            operation="report_outcome",
+            body=payload,
+        )
+        outcome = data.get("outcome") or {}
+        return OutcomeResult(
+            action_id=str(data.get("actionId", tag)),
+            status=str(outcome.get("status", status)),
+            score_bps=outcome.get("scoreBps"),
+            note=outcome.get("note"),
+            report_count=int(outcome.get("reportCount", 1)),
+            reported_at=outcome.get("reportedAt"),
+        )
 
     def balance(self) -> float:
         """Return the agent's spendable balance in dollars.
