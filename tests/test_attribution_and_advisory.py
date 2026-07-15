@@ -166,6 +166,13 @@ def test_report_outcome_validates_score_locally() -> None:
         agent.report_outcome("a1", "success", score_bps=20000)
 
 
+def test_report_outcome_rejects_bool_score() -> None:
+    # bool subclasses int in Python — True must not serialize as scoreBps.
+    agent = FloeAgent(api_key="floe_test")
+    with pytest.raises(FloeAgentError, match="score_bps"):
+        agent.report_outcome("a1", "success", score_bps=True)  # type: ignore[arg-type]
+
+
 def test_report_outcome_surfaces_server_errors() -> None:
     urlopen, _ = _capture_urlopen(status=400, body=b'{"error":"invalid_action_id"}')
     agent = FloeAgent(api_key="floe_test")

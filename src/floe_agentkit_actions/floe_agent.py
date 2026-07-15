@@ -400,7 +400,10 @@ class FloeAgent:
         """
         tag = _validate_tag("action_id", action_id)
         if score_bps is not None and (
-            not isinstance(score_bps, int) or score_bps < 0 or score_bps > 10000
+            not isinstance(score_bps, int)
+            or isinstance(score_bps, bool)
+            or score_bps < 0
+            or score_bps > 10000
         ):
             raise FloeAgentError(
                 f"score_bps must be an integer 0..10000 (got {score_bps}).", 400

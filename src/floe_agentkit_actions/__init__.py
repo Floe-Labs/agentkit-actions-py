@@ -15,6 +15,7 @@ from .action_provider import FloeActionProvider
 from .floe_agent import (
     BalanceResult,
     BudgetAdvisory,
+    BudgetAdvisoryTightest,
     FetchResult,
     FloeAgent,
     FloeAgentError,
@@ -74,6 +75,6 @@ __all__ = [
     # High-level runtime client (no wallet, no chain knowledge — `floe_*` key only).
     "FloeAgent", "FloeAgentError",
     "FetchResult", "BalanceResult", "RawBalance", "ReservationStatus", "TransactionsResult",
-    "BudgetAdvisory", "OutcomeResult",
+    "BudgetAdvisory", "BudgetAdvisoryTightest", "OutcomeResult",
     "X402FetchResult",  # deprecated alias for FetchResult
 ]
