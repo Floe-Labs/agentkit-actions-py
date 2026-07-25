@@ -10,7 +10,11 @@ import os
 
 
 def main() -> None:
-    from coinbase_agentkit.wallet_providers import EvmWalletProvider
+    from coinbase_agentkit.wallet_providers import (
+        EthAccountWalletProvider,
+        EthAccountWalletProviderConfig,
+    )
+    from eth_account import Account
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
 
@@ -22,9 +26,11 @@ def main() -> None:
         print("Error: Set PRIVATE_KEY environment variable")
         return
 
-    wallet_provider = EvmWalletProvider(
-        private_key=private_key,
-        network_id="base-mainnet",
+    wallet_provider = EthAccountWalletProvider(
+        EthAccountWalletProviderConfig(
+            account=Account.from_key(private_key),
+            chain_id="8453",  # Base Mainnet
+        )
     )
 
     # Get Floe tools as LangChain tools

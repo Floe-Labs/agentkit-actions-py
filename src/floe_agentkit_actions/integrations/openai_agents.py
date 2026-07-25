@@ -25,8 +25,9 @@ def get_floe_openai_tools(
     provider = floe_action_provider(config)
     tools: list[dict[str, Any]] = []
 
-    for action in provider.get_actions():
-        schema = action.schema
+    # coinbase-agentkit >= 0.7: get_actions() requires the wallet provider.
+    for action in provider.get_actions(wallet_provider):
+        schema = action.args_schema
         json_schema = schema.model_json_schema() if hasattr(schema, "model_json_schema") else {}
 
         tools.append({

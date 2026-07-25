@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import signal
@@ -32,7 +33,12 @@ from .prompts import prompt_reuse_saved_config, run_setup_flow
 from .wallet_factory import create_wallet
 
 console = Console()
-VERSION = "0.4.0"
+# Read the installed distribution version so `--version` can never drift from
+# pyproject.toml again (it was hardcoded at 0.4.0 while the package shipped 0.5.x).
+try:
+    VERSION = importlib.metadata.version("floe-agentkit-actions")
+except importlib.metadata.PackageNotFoundError:  # uninstalled source tree
+    VERSION = "unknown"
 
 # Known market pairs on Base Mainnet
 MARKET_PAIRS: list[dict[str, str]] = [
@@ -81,6 +87,7 @@ def _print_root_help() -> None:
     print("Environment variables:")
     print("  PRIVATE_KEY                     Wallet private key")
     print("  CDP_API_KEY_NAME / *_PRIVATE_KEY  Coinbase CDP credentials")
+    print("  CDP_WALLET_SECRET               CDP v2 wallet secret (cdp wallet type)")
     print("  OPENAI_API_KEY / ANTHROPIC_API_KEY  AI provider keys")
     print("  BASE_RPC_URL                    Custom Base RPC")
     print("  FLOE_FACILITATOR_URL            Default facilitator URL")
@@ -543,9 +550,9 @@ def _execute_tool(name: str, arguments: dict[str, Any], action_map: dict[str, An
     """Execute a Floe action by name."""
     if name not in action_map:
         return f"Unknown tool: {name}"
-    action_fn, wallet_provider = action_map[name]
+    action_fn = action_map[name]
     try:
-        return action_fn(wallet_provider, arguments)
+        return action_fn(arguments)
     except Exception as e:
         return f"Error executing {name}: {e}"
 
@@ -557,8 +564,10 @@ def _build_tools(
     tools: list[dict[str, Any]] = []
     action_map: dict[str, Any] = {}
 
-    for action in provider.get_actions():
-        schema = action.schema
+    # coinbase-agentkit >= 0.7: get_actions() requires the wallet provider and
+    # returns Action objects whose `invoke` closure already binds it.
+    for action in provider.get_actions(wallet_provider):
+        schema = action.args_schema
         # Convert Pydantic schema to JSON Schema
         json_schema = schema.model_json_schema() if hasattr(schema, "model_json_schema") else {}
 
@@ -571,7 +580,7 @@ def _build_tools(
             },
         }
         tools.append(tool_def)
-        action_map[action.name] = (action.invoke, wallet_provider)
+        action_map[action.name] = action.invoke
 
     return tools, action_map
 

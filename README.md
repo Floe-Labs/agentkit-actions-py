@@ -69,14 +69,20 @@ pip install "floe-agentkit-actions[langchain]"
 
 ```python
 import os
-from coinbase_agentkit.wallet_providers import EvmWalletProvider
+from coinbase_agentkit.wallet_providers import (
+    EthAccountWalletProvider,
+    EthAccountWalletProviderConfig,
+)
+from eth_account import Account
 from floe_agentkit_actions import floe_action_provider
 
-# 1. Wallet provider (use any CDP/Privy/Viem provider; private key shown for brevity)
-wallet_provider = EvmWalletProvider.from_private_key(
-    private_key=os.environ["PRIVATE_KEY"],
-    rpc_url=os.environ["BASE_RPC_URL"],
-    network_id="base-mainnet",
+# 1. Wallet provider (any AgentKit wallet provider works; private key shown for brevity)
+wallet_provider = EthAccountWalletProvider(
+    EthAccountWalletProviderConfig(
+        account=Account.from_key(os.environ["PRIVATE_KEY"]),
+        chain_id="8453",  # Base Mainnet
+        rpc_url=os.environ["BASE_RPC_URL"],
+    )
 )
 
 provider = floe_action_provider()
@@ -269,8 +275,8 @@ The CLI prompts for:
 
 | Provider | Use Case |
 |----------|----------|
-| Private Key (`EvmWalletProvider`) | Development / scripting |
-| CDP (`CdpWalletProvider`) | Production agents (MPC) |
+| Private Key (`EthAccountWalletProvider`) | Development / scripting |
+| CDP (`CdpEvmWalletProvider`) | Production agents (MPC) — needs `CDP_API_KEY_NAME`, `CDP_API_KEY_PRIVATE_KEY`, `CDP_WALLET_SECRET` |
 
 ---
 
@@ -342,6 +348,7 @@ These are read by the CLI and the examples in this repo. The SDK itself does **n
 | `PRIVATE_KEY` | CLI / examples | Wallet private key (0x...) |
 | `CDP_API_KEY_NAME` | CLI | Coinbase CDP API key name |
 | `CDP_API_KEY_PRIVATE_KEY` | CLI | Coinbase CDP API secret |
+| `CDP_WALLET_SECRET` | CLI | Coinbase CDP v2 wallet secret (required with the CDP wallet type) |
 | `OPENAI_API_KEY` | CLI | OpenAI key for the conversational agent |
 | `ANTHROPIC_API_KEY` | CLI | Anthropic key for the conversational agent |
 | `BASE_RPC_URL` | CLI / examples | Custom Base RPC (recommended) |
