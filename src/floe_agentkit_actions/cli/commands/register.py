@@ -69,7 +69,16 @@ def _resolve_wallet_config(existing: FloeAgentConfig | None) -> dict[str, Any]:
     key = os.environ.get("CDP_API_KEY_PRIVATE_KEY") or require_prompt(
         questionary.password("CDP API Key Private Key:").ask(), "CDP API Key Private Key"
     )
-    return {"type": "cdp", "api_key_name": name, "api_key_private_key": key}
+    # CDP v2 server wallets need a third credential alongside the API key.
+    secret = os.environ.get("CDP_WALLET_SECRET") or require_prompt(
+        questionary.password("CDP Wallet Secret:").ask(), "CDP Wallet Secret"
+    )
+    return {
+        "type": "cdp",
+        "api_key_name": name,
+        "api_key_private_key": key,
+        "wallet_secret": secret,
+    }
 
 
 def run_register_command(args: RegisterArgs) -> None:

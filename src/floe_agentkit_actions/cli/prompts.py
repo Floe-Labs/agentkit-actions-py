@@ -35,16 +35,25 @@ def run_setup_flow(saved_config: FloeAgentConfig | None = None) -> dict[str, Any
     else:
         name = os.environ.get("CDP_API_KEY_NAME")
         key = os.environ.get("CDP_API_KEY_PRIVATE_KEY")
-        if name and key:
+        # CDP v2 server wallets need a third credential alongside the API key.
+        secret = os.environ.get("CDP_WALLET_SECRET")
+        if name and key and secret:
             console.print("[dim]  Using CDP credentials from environment[/dim]")
-            wallet_config = {"type": "cdp", "api_key_name": name, "api_key_private_key": key}
+            wallet_config = {
+                "type": "cdp",
+                "api_key_name": name,
+                "api_key_private_key": key,
+                "wallet_secret": secret,
+            }
         else:
             api_key_name = name or questionary.text("CDP API Key Name:").ask()
             api_key_private_key = key or questionary.password("CDP API Key Private Key:").ask()
+            wallet_secret = secret or questionary.password("CDP Wallet Secret:").ask()
             wallet_config = {
                 "type": "cdp",
                 "api_key_name": api_key_name,
                 "api_key_private_key": api_key_private_key,
+                "wallet_secret": wallet_secret,
             }
 
     # Step 3: RPC URL

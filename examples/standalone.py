@@ -10,7 +10,11 @@ import os
 
 
 def main() -> None:
-    from coinbase_agentkit.wallet_providers import EvmWalletProvider
+    from coinbase_agentkit.wallet_providers import (
+        EthAccountWalletProvider,
+        EthAccountWalletProviderConfig,
+    )
+    from eth_account import Account
 
     from floe_agentkit_actions import FloeConfig, floe_action_provider
 
@@ -21,10 +25,12 @@ def main() -> None:
         return
 
     rpc_url = os.environ.get("BASE_RPC_URL")
-    wallet_provider = EvmWalletProvider(
-        private_key=private_key,
-        network_id="base-mainnet",
-        **({"rpc_url": rpc_url} if rpc_url else {}),
+    wallet_provider = EthAccountWalletProvider(
+        EthAccountWalletProviderConfig(
+            account=Account.from_key(private_key),
+            chain_id="8453",  # Base Mainnet
+            rpc_url=rpc_url,
+        )
     )
 
     address = wallet_provider.get_address()
