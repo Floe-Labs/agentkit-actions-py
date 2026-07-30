@@ -46,7 +46,7 @@ Two layers in one package:
 
 > **Package name:** the Python distribution is `floe-agentkit-actions` (the TypeScript distribution is `floe-agent`). The action surface is identical.
 
-> **$2 free credit (~200 API calls).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
+> **$3 Welcome Credit (300 API credits).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
 
 ---
 
