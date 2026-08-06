@@ -22,7 +22,8 @@ One key for your agent's whole vendor bill — LLM, voice, telephony, search, da
 | **Agent** — Claude Code / Cursor does the setup | paste: `Read https://dev-dashboard.floelabs.xyz/agents.md and set up Floe for this project.` |
 | **Skill** — install the Floe agent skill | `npx skills add floe-labs/agent-skills` |
 | **MCP** — hosted MCP server (65 tools) | `npx -y add-mcp https://mcp.floelabs.xyz/mcp` |
-| **NPM** — the CLI + SDK | `npm i -g floe-agent` |
+| **CLI** — mint a key + print the base-URL swap | `npx @floelabs/cli init` |
+| **NPM** — the SDK + `floe-agent` CLI | `npm i -g floe-agent` |
 
 New accounts get a **$3 Welcome Credit (300 API credits)** — no card. [Set up with your AI tools →](https://floe-labs.gitbook.io/docs/getting-started/setup-with-ai-tools) · [Get a key →](https://dev-dashboard.floelabs.xyz)
 
@@ -45,8 +46,6 @@ Two layers in one package:
 | **Action providers** | 47 AgentKit actions for self-custody, lending, and framework integrations — full parity with the TypeScript `floe-agent` package. | Self-custody / on-chain use cases |
 
 > **Package name:** the Python distribution is `floe-agentkit-actions` (the TypeScript distribution is `floe-agent`). The action surface is identical.
-
-> **$2 free credit (~200 API calls).** Your agent can start paying for APIs today — no card required. [Get started →](https://dev-dashboard.floelabs.xyz)
 
 ---
 
@@ -269,6 +268,10 @@ Keyless pay-as-you-go LLM/voice gateway (FLO-602). Browse and price before spend
 ---
 
 ## CLI
+
+> The `floe` bin name belongs to the standalone platform CLI,
+> [`@floelabs/cli`](https://github.com/Floe-Labs/floe-cli) (`npx @floelabs/cli init` — init / status / test / budget / keys).
+> This package's `floe-agent` command is the interactive AgentKit agent.
 
 ```bash
 floe-agent
