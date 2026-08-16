@@ -276,6 +276,15 @@ class EstimateX402CostSchema(BaseModel):
         return v
 
 
+class GetCoverageScoreSchema(BaseModel):
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Lookback window in days for the coverage calculation (default 30, max 365).",
+    )
+
+
 # ── D1 merchant allowlist schemas ─────────────────────────────────────────────
 # An allowlist "entry" is an ordinary agent policy row (kind='api' for hosts,
 # kind='vendor' for payees) that doubles as "allowed AND capped". The mode flag
@@ -1113,8 +1122,9 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             return f"Error fetching transactions: {e}"
 
     # ════════════════════════════════════════════════════════════════════════
-    # AGENT AWARENESS (9) — answer "do I have credit?", "is this call worth
-    # it?", "where am I in the loan lifecycle?" before committing capital.
+    # AGENT AWARENESS (10) — answer "do I have credit?", "is this call worth
+    # it?", "where am I in the loan lifecycle?", "how much of my spend does Floe
+    # actually enforce?" before committing capital.
     # All require facilitator_api_key to be set on the provider config.
     # ════════════════════════════════════════════════════════════════════════
 
@@ -1385,6 +1395,40 @@ class X402ActionProvider(ActionProvider[EvmWalletProvider]):
             return "\n".join(lines)
         except Exception as e:
             return f"Error estimating cost: {e}"
+
+    # ── get_coverage_score ─────────────────────────────────────────────────
+
+    @create_action(
+        name="get_coverage_score",
+        description=(
+            "Report the agent's Coverage Score: the share of its known spend that Floe enforces "
+            "pre-call, vs reconciled (off-path spend Floe recorded after the fact but did not gate) "
+            "vs dark (spend Floe never saw). Optional `days` window (default 30). Use to reason about "
+            "how much of your own spend is actually enforced. Pairs with floe-guard's opt-in ledger "
+            "sync, which feeds the reconciled bucket."
+        ),
+        schema=GetCoverageScoreSchema,
+    )
+    def get_coverage_score(self, wallet_provider: EvmWalletProvider, args: dict) -> str:
+        try:
+            days = args.get("days", 30)
+            resp = self._facilitator_fetch(f"/v1/agents/coverage?days={days}")
+            if resp["status"] >= 400:
+                return f"Error: {resp['body'].get('error', resp['body'].get('detail', 'Unknown'))}"
+            d = resp["body"]
+            return "\n".join([
+                "## Coverage Score\n",
+                f"**Coverage**: {format_bps(int(d.get('coverageScoreBps', 0)))} (last {d.get('days', days)} days)",
+                "",
+                f"**Pre-call enforceable**: {format_bps(int(d.get('preCallEnforceableBps', 0)))}",
+                f"**Reconciled (off-path)**: {format_bps(int(d.get('reconciledBps', 0)))}",
+                f"**Dark**: {format_bps(int(d.get('darkBps', 0)))}",
+                "",
+                "_Reconciled = off-path spend Floe recorded after the fact but did not gate. "
+                "Coverage is a budget measure, not a wallet balance._",
+            ])
+        except Exception as e:
+            return f"Error fetching coverage: {e}"
 
     # ════════════════════════════════════════════════════════════════════════
     # FLOE INFERENCE (2) — FLO-602 keyless pay-as-you-go LLM/voice gateway.
