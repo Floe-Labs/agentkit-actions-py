@@ -4,17 +4,17 @@ Validates that both providers export the expected number of actions, and
 documents the current gap against the TypeScript reference
 (`agentkit-actions`).
 
-Current state (July 2026 — FLO-602 inference actions landed in both ports):
+Current state (Aug 2026 — get_coverage_score awareness action landed in both ports):
 
-- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=24 = 54
-- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=24 = 54
+- TypeScript agentkit-actions: FloeActionProvider=30 + X402ActionProvider=25 = 55
+- Python agentkit-actions-py:  FloeActionProvider=30 + X402ActionProvider=25 = 55
 
 X402ActionProvider has 6 credit-delegation actions (grant/revoke/check +
-x402_fetch + x402_get_balance + x402_get_transactions) + 9 agent-awareness
+x402_fetch + x402_get_balance + x402_get_transactions) + 10 agent-awareness
 actions (get_credit_remaining, get_loan_state, {get,set,clear}_spend_limit,
-{list,register,delete}_credit_threshold, estimate_x402_cost) + 1 managed
-credit-line action (open_credit_line) added in v0.4 + 1 settlement helper
-(x402_await_settlement) added in FLO-567 + 5 merchant-allowlist actions
+{list,register,delete}_credit_threshold, estimate_x402_cost, get_coverage_score)
++ 1 managed credit-line action (open_credit_line) added in v0.4 + 1 settlement
+helper (x402_await_settlement) added in FLO-567 + 5 merchant-allowlist actions
 ({set,get}_allowlist_mode, {add,remove}_allowlist_entry, list_allowlist) + 2
 FLO-602 inference actions (list_inference_models, estimate_inference_cost).
 
@@ -37,16 +37,16 @@ from floe_agentkit_actions.x402_action_provider import X402ActionProvider
 #       floe-labs-docs if the combined total changed
 #   (b) Someone removed an action — investigate whether that was intentional
 FLOE_PROVIDER_ACTION_COUNT = 30  # full TS parity: 23 base + 7 credit-facility
-X402_PROVIDER_ACTION_COUNT = 24  # 6 x402 delegation + 9 agent-awareness + 1 open_credit_line (v0.4) + 1 x402_await_settlement (FLO-567) + 5 D1 merchant-allowlist + 2 FLO-602 inference (list_inference_models, estimate_inference_cost)
-TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 54
+X402_PROVIDER_ACTION_COUNT = 25  # 6 x402 delegation + 10 agent-awareness + 1 open_credit_line (v0.4) + 1 x402_await_settlement (FLO-567) + 5 D1 merchant-allowlist + 2 FLO-602 inference (list_inference_models, estimate_inference_cost)
+TOTAL_ACTION_COUNT = FLOE_PROVIDER_ACTION_COUNT + X402_PROVIDER_ACTION_COUNT  # 55
 
 # The TypeScript reference port. Gap = TS - Python.
 #
 # The ports are at exact parity: the 2 FLO-602 inference actions
 # (list_inference_models, estimate_inference_cost) have landed in the
 # TypeScript port — verified: agentkit-actions x402ActionProvider exports
-# 24 @CreateAction decorators + 30 in floeActionProvider = 54, matching Python.
-TS_REFERENCE_TOTAL = 54
+# 25 @CreateAction decorators + 30 in floeActionProvider = 55, matching Python.
+TS_REFERENCE_TOTAL = 55
 PARITY_GAP = TS_REFERENCE_TOTAL - TOTAL_ACTION_COUNT  # 0 (exact parity)
 
 

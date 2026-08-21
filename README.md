@@ -152,7 +152,7 @@ print(result)
 
 ---
 
-## Actions (54 total)
+## Actions (55 total)
 
 ### Read Actions (8)
 
@@ -226,9 +226,9 @@ All write actions **auto-approve** tokens to the LendingIntentMatcher with a 1% 
 | `x402_await_settlement` | Poll a pending x402 reservation until it settles |
 | `x402_get_transactions` | List recent x402 payment transactions |
 
-### Agent Awareness Actions (9)
+### Agent Awareness Actions (10)
 
-Lets an agent answer "do I have credit?", "is this call worth it?", and "where am I in the loan lifecycle?" before committing capital. All require a facilitator API key to be configured on the provider via `X402Config(facilitator_api_key=...)`.
+Lets an agent answer "do I have credit?", "is this call worth it?", "where am I in the loan lifecycle?", and "how much of my spend does Floe actually enforce?" before committing capital. All require a facilitator API key to be configured on the provider via `X402Config(facilitator_api_key=...)`.
 
 | Action | Description |
 |--------|-------------|
@@ -241,6 +241,7 @@ Lets an agent answer "do I have credit?", "is this call worth it?", and "where a
 | `register_credit_threshold` | Register a webhook trigger at a utilization threshold (cap: 20 per agent) |
 | `delete_credit_threshold` | Remove a registered threshold |
 | `estimate_x402_cost` | Preflight an x402 URL — returns cost + reflection against your credit (no payment) |
+| `get_coverage_score` | Coverage Score — share of known spend Floe enforces pre-call vs reconciled (off-path) vs dark (optional `days`, default 30) |
 
 > **Decision-loop pattern:** call `estimate_x402_cost` → inspect the returned string for `willExceedAvailable` / `willExceedSpendLimit` → conditionally `x402_fetch`. This is the "answer the 3 rational-agent questions in one round-trip" workflow.
 
