@@ -5,9 +5,12 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
 
-**Spend controls for Voice AI — Python SDK.** One key that pays any x402 vendor
-API — telephony, STT, LLM, TTS, search, data — through one endpoint, with budgets
-your agent can reason about. Walletless. No crypto required.
+**The Python SDK for Floe — know what every AI call really costs.** Floe costs each call
+the moment it ends across every vendor — telephony, STT, LLM, TTS, search, data — on one
+ledger, ties the spend to the client and campaign, and shows your margin per contract; then
+you bill your own customers off those actuals through your own Stripe. This SDK is the
+programmatic surface: one key that pays any x402 vendor API through one endpoint, with
+budgets your agent can reason about. Walletless. No crypto required.
 
 [Website](https://floelabs.xyz) · [Docs](https://floe-labs.gitbook.io/docs) · [Dashboard](https://dev-dashboard.floelabs.xyz) · [TypeScript SDK](https://github.com/Floe-Labs/agentkit-actions)
 
