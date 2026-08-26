@@ -1,6 +1,8 @@
 # floe-agentkit-actions
 
 [![PyPI version](https://img.shields.io/pypi/v/floe-agentkit-actions)](https://pypi.org/project/floe-agentkit-actions/)
+[![Downloads](https://static.pepy.tech/badge/floe-agentkit-actions/month)](https://pepy.tech/project/floe-agentkit-actions)
+[![CI](https://github.com/Floe-Labs/agentkit-actions-py/actions/workflows/ci.yml/badge.svg)](https://github.com/Floe-Labs/agentkit-actions-py/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://python.org)
 [![Base Mainnet](https://img.shields.io/badge/Base-Mainnet-0052FF)](https://basescan.org/address/0x17946cD3e180f82e632805e5549EC913330Bb175)
