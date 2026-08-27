@@ -14,7 +14,7 @@ you bill your own customers off those actuals through your own Stripe. This SDK 
 programmatic surface: one key that pays any x402 vendor API through one endpoint, with
 budgets your agent can reason about. Walletless. No crypto required.
 
-[Website](https://floelabs.xyz) · [Docs](https://floe-labs.gitbook.io/docs) · [Dashboard](https://dev-dashboard.floelabs.xyz) · [TypeScript SDK](https://github.com/Floe-Labs/agentkit-actions)
+[Website](https://floefinance.com) · [Docs](https://floe-labs.gitbook.io/docs) · [Dashboard](https://dev-dashboard.floelabs.xyz) · [TypeScript SDK](https://github.com/Floe-Labs/agentkit-actions)
 
 ---
 
@@ -404,7 +404,7 @@ pytest
 
 ## Links
 
-- [Website](https://floelabs.xyz)
+- [Website](https://floefinance.com)
 - [Documentation](https://floe-labs.gitbook.io/docs)
 - [TypeScript counterpart (`floe-agent`)](https://github.com/Floe-Labs/agentkit-actions)
 - [MCP server (`@floelabs/mcp-server`)](https://github.com/Floe-Labs/floe-mcp-server)
