@@ -13,7 +13,7 @@ keywords = ["crewai", "ai-agent", "x402", "floe", "budget", "llm-cost", "base"]
 
 [[project.authors]]
 name = "Floe Labs"
-email = "hello@floelabs.xyz"
+email = "hello@floefinance.com"
 
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://floelabs.xyz"
+Homepage = "https://floefinance.com"
 Repository = "https://github.com/Floe-Labs/agentkit-actions-py"
 Documentation = "https://floe-labs.gitbook.io/docs/frameworks/crewai"
 
