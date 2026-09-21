@@ -14,7 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
-from floe_agentkit_actions import FloeAgent, FloeAgentError, OutcomeResult
+from floe_agentkit_actions import (
+    FloeAgent,
+    FloeAgentError,
+    OutcomeClaim,
+    OutcomeResult,
+)
 
 
 def _msg(headers: dict[str, str]) -> Message:
@@ -127,6 +132,116 @@ def test_fetch_rejects_overlong_action_id_locally() -> None:
     agent = FloeAgent(api_key="floe_test")
     with pytest.raises(FloeAgentError):
         agent.fetch(url="https://api.example.com", action_id="x" * 129)
+
+
+# ── emit_outcome() ──────────────────────────────────────────────
+
+
+def test_emit_outcome_posts_and_parses() -> None:
+    response = {
+        "outcome": {
+            "eventId": "oev_00112233445566aa",
+            "interactionId": "int_00112233445566bb",
+            "outcomeKind": "meeting_booked",
+            "status": "reported",
+            "quantity": 1,
+            "occurredAt": "2026-09-15T00:00:00Z",
+            "confirmedAt": None,
+            "source": "agent",
+            "externalSystem": None,
+            "externalRef": None,
+            "evidenceNote": None,
+            "supersedesEventId": None,
+            "billedInPeriodId": None,
+        }
+    }
+    urlopen, captured = _capture_urlopen(body=json.dumps(response).encode())
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        claim = agent.emit_outcome(
+            "call-8821",
+            "meeting_booked",
+            idempotency_key="call-8821:meeting_booked",
+        )
+
+    req = captured[0]
+    assert req.full_url.endswith("/v1/agents/outcomes")
+    assert req.get_method() == "POST"
+    # Omitted optionals stay ABSENT, not null — the route is strict.
+    assert json.loads(req.data.decode()) == {
+        "taskId": "call-8821",
+        "outcomeKind": "meeting_booked",
+        "idempotencyKey": "call-8821:meeting_booked",
+    }
+    assert isinstance(claim, OutcomeClaim)
+    assert claim.event_id == "oev_00112233445566aa"
+    assert claim.status == "reported"
+    # Emitting never sets the billing anchor; only an operator's confirm does.
+    assert claim.confirmed_at is None
+
+
+def test_emit_outcome_sends_evidence_allowlist() -> None:
+    response = {
+        "outcome": {
+            "eventId": "oev_00112233445566aa",
+            "interactionId": "int_1",
+            "outcomeKind": "meeting_booked",
+            "status": "reported",
+            "quantity": 2,
+            "occurredAt": "2026-09-15T00:00:00Z",
+            "confirmedAt": None,
+            "source": "agent",
+            "externalSystem": "hubspot",
+            "externalRef": "DEAL-9",
+            "evidenceNote": None,
+            "supersedesEventId": None,
+            "billedInPeriodId": None,
+        }
+    }
+    urlopen, captured = _capture_urlopen(body=json.dumps(response).encode())
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        claim = agent.emit_outcome(
+            "call-8821",
+            "meeting_booked",
+            idempotency_key="k1",
+            quantity=2,
+            external_system="hubspot",
+            external_ref="DEAL-9",
+        )
+
+    sent = json.loads(captured[0].data.decode())
+    assert sent["quantity"] == 2
+    # Verbatim: a CRM id is case-sensitive, and equality on this pair is what
+    # proves two claims are one fact.
+    assert sent["externalRef"] == "DEAL-9"
+    assert claim.external_ref == "DEAL-9"
+
+
+def test_emit_outcome_rejects_external_ref_without_system_locally() -> None:
+    agent = FloeAgent(api_key="floe_test")
+    with pytest.raises(FloeAgentError, match="external_ref requires external_system"):
+        agent.emit_outcome(
+            "call-1", "meeting_booked", idempotency_key="k1", external_ref="DEAL-9"
+        )
+
+
+def test_emit_outcome_validates_kind_and_quantity_locally() -> None:
+    agent = FloeAgent(api_key="floe_test")
+    with pytest.raises(FloeAgentError, match="outcome_kind"):
+        agent.emit_outcome("call-1", "x" * 65, idempotency_key="k1")
+    with pytest.raises(FloeAgentError, match="quantity"):
+        agent.emit_outcome(
+            "call-1", "meeting_booked", idempotency_key="k1", quantity=0
+        )
+
+
+def test_emit_outcome_allows_a_key_longer_than_a_tag_but_caps_at_200() -> None:
+    """The idempotency key is not an attribution tag: rejecting one the API
+    would have accepted is a client bug, not strictness."""
+    agent = FloeAgent(api_key="floe_test")
+    with pytest.raises(FloeAgentError, match="idempotency_key"):
+        agent.emit_outcome("call-1", "meeting_booked", idempotency_key="k" * 201)
 
 
 # ── report_outcome() ────────────────────────────────────────────

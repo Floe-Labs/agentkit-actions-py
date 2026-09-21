@@ -169,6 +169,39 @@ class OutcomeResult:
 
 
 @dataclass
+class OutcomeClaim:
+    """One outcome claim, as returned by :meth:`FloeAgent.emit_outcome`
+    (P3.1).
+
+    Distinct from :class:`OutcomeResult` above, which is your own eval signal
+    for a tagged action and never reaches an invoice. This is the billable
+    claim: what a task PRODUCED, bound to the call it happened on.
+    """
+
+    event_id: str
+    interaction_id: Optional[str]
+    """The call this claim is bound to."""
+    outcome_kind: str
+    status: str
+    """reported | confirmed | disputed | void | reversed. An agent key only
+    ever produces ``reported``."""
+    quantity: int
+    occurred_at: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    """The billing anchor. None until an OPERATOR confirms — emitting never
+    sets it, because confirming is what makes a claim billable."""
+    source: str = "agent"
+    """WHO asserted this, stamped at write and never recomputed."""
+    external_system: Optional[str] = None
+    external_ref: Optional[str] = None
+    evidence_note: Optional[str] = None
+    supersedes_event_id: Optional[str] = None
+    """The claim this one corrected; None on a first claim."""
+    billed_in_period_id: Optional[int] = None
+    """Set once a period close has billed it — the claim is then frozen."""
+
+
+@dataclass
 class RawBalance:
     credit_limit_raw: str
     credit_used_raw: str
@@ -427,6 +460,126 @@ class FloeAgent:
             note=outcome.get("note"),
             report_count=int(outcome.get("reportCount", 1)),
             reported_at=outcome.get("reportedAt"),
+        )
+
+    def emit_outcome(
+        self,
+        task_id: str,
+        outcome_kind: str,
+        idempotency_key: str,
+        quantity: Optional[int] = None,
+        occurred_at: Optional[str] = None,
+        external_system: Optional[str] = None,
+        external_ref: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> OutcomeClaim:
+        """Emit an outcome for a task; Floe binds it to the call (P3.1)::
+
+            agent.fetch(url, task_id="call-8821")
+            agent.emit_outcome(
+                "call-8821", "meeting_booked",
+                idempotency_key="call-8821:meeting_booked",
+            )
+
+        Cost and outcome then sit on one row, which is what makes
+        cost-per-outcome a number rather than an estimate.
+
+        NOT :meth:`report_outcome`. That is your own eval signal for a tagged
+        action and never reaches an invoice. This is the billable claim. They
+        share a word and nothing else.
+
+        AN AGENT KEY MAY ONLY REPORT. Confirming a claim, voiding one and
+        resolving a collision are operator acts on the developer surface: they
+        move money, and the evidence justifying them — a CRM webhook, a
+        calendar invitation — reaches your backend minutes to days after the
+        call, never this process. There is deliberately no ``status``
+        argument.
+
+        A task id that names no call is REFUSED (404) rather than stored
+        unattached: an outcome nothing can bill is worse than no outcome,
+        because it looks like one.
+        """
+        tag = _validate_tag("task_id", task_id)
+
+        kind = outcome_kind.strip() if isinstance(outcome_kind, str) else ""
+        if len(kind) == 0 or len(kind) > 64:
+            raise FloeAgentError(
+                "outcome_kind must be 1..64 characters after stripping.", 400
+            )
+
+        # Capped at the server's 200, NOT at MAX_TAG_LENGTH — rejecting a key
+        # the API would have accepted is a bug in the client, not strictness.
+        if (
+            not isinstance(idempotency_key, str)
+            or len(idempotency_key) == 0
+            or len(idempotency_key) > 200
+        ):
+            raise FloeAgentError("idempotency_key must be 1..200 characters.", 400)
+
+        if quantity is not None and (
+            not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1
+        ):
+            raise FloeAgentError(
+                f"quantity must be an integer of at least 1 (got {quantity}).", 400
+            )
+        if external_system is not None and (
+            not isinstance(external_system, str)
+            or len(external_system) == 0
+            or len(external_system) > 64
+        ):
+            raise FloeAgentError("external_system must be 1..64 characters.", 400)
+        if external_ref is not None and (
+            not isinstance(external_ref, str)
+            or len(external_ref) == 0
+            or len(external_ref) > 256
+        ):
+            raise FloeAgentError("external_ref must be 1..256 characters.", 400)
+        # The server's CHECK constraint says the same thing; failing here names
+        # the actual mistake instead of returning a constraint message.
+        if external_ref is not None and external_system is None:
+            raise FloeAgentError("external_ref requires external_system.", 400)
+        if note is not None and (not isinstance(note, str) or len(note) > 500):
+            raise FloeAgentError("note must be at most 500 characters.", 400)
+
+        payload: dict[str, Any] = {
+            "taskId": tag,
+            "outcomeKind": kind,
+            "idempotencyKey": idempotency_key,
+        }
+        # Omitted optionals stay ABSENT, not null — the route is strict and
+        # rejects unknown or malformed fields rather than dropping them.
+        if quantity is not None:
+            payload["quantity"] = quantity
+        if occurred_at is not None:
+            payload["occurredAt"] = occurred_at
+        if external_system is not None:
+            payload["externalSystem"] = external_system
+        if external_ref is not None:
+            payload["externalRef"] = external_ref
+        if note is not None:
+            payload["note"] = note
+
+        data = self._json_request(
+            "POST",
+            "/v1/agents/outcomes",
+            operation="emit_outcome",
+            body=payload,
+        )
+        outcome = data.get("outcome") or {}
+        return OutcomeClaim(
+            event_id=str(outcome.get("eventId", "")),
+            interaction_id=outcome.get("interactionId"),
+            outcome_kind=str(outcome.get("outcomeKind", kind)),
+            status=str(outcome.get("status", "reported")),
+            quantity=int(outcome.get("quantity", 1)),
+            occurred_at=outcome.get("occurredAt"),
+            confirmed_at=outcome.get("confirmedAt"),
+            source=str(outcome.get("source", "agent")),
+            external_system=outcome.get("externalSystem"),
+            external_ref=outcome.get("externalRef"),
+            evidence_note=outcome.get("evidenceNote"),
+            supersedes_event_id=outcome.get("supersedesEventId"),
+            billed_in_period_id=outcome.get("billedInPeriodId"),
         )
 
     def balance(self) -> float:
