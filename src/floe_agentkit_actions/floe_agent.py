@@ -20,17 +20,25 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Optional, TypedDict
 
 DEFAULT_BASE_URL = "https://credit-api.floelabs.xyz"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 MAX_TAG_LENGTH = 128
+
+# RFC-3339 with a Z, mirroring the route's ``z.string().datetime()``: neither a
+# bare date nor a +01:00 offset is accepted there, so neither is accepted here.
+# Matching the shape is not enough on its own — "2026-13-45T00:00:00Z" passes
+# this and is still not an instant — so callers pair it with a parse.
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 USDC_DECIMALS = 6
 USDC_SCALE = 10**USDC_DECIMALS
 
@@ -540,6 +548,25 @@ class FloeAgent:
             raise FloeAgentError("external_ref requires external_system.", 400)
         if note is not None and (not isinstance(note, str) or len(note) > 500):
             raise FloeAgentError("note must be at most 500 characters.", 400)
+        # The route declares occurredAt as z.string().datetime() — RFC-3339
+        # with a Z, so neither "2026-09-15" nor a +01:00 offset is accepted
+        # there. Validating it here keeps the failure local instead of a round
+        # trip, and matches the TS SDK field for field.
+        if occurred_at is not None:
+            if not isinstance(occurred_at, str) or not _ISO_UTC_RE.match(occurred_at):
+                raise FloeAgentError(
+                    "occurred_at must be an ISO-8601 UTC timestamp like "
+                    f"2026-09-15T10:30:00Z (got {occurred_at!r}).",
+                    400,
+                )
+            # Shape-valid is not the same as real: "2026-13-45T00:00:00Z"
+            # matches the pattern and is not an instant.
+            try:
+                datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+            except ValueError:
+                raise FloeAgentError(
+                    f"occurred_at is not a real timestamp (got {occurred_at!r}).", 400
+                ) from None
 
         payload: dict[str, Any] = {
             "taskId": tag,

@@ -218,6 +218,59 @@ def test_emit_outcome_sends_evidence_allowlist() -> None:
     assert claim.external_ref == "DEAL-9"
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-a-date",
+        "2026-09-15",                # date only — the route refuses it
+        "2026-09-15T10:30:00+01:00",  # offset — the route demands Z
+        "2026-13-45T00:00:00Z",      # shape-valid, not a real instant
+    ],
+)
+def test_emit_outcome_rejects_a_non_iso_occurred_at_locally(bad: str) -> None:
+    """The route declares occurredAt as z.string().datetime(); a value that is
+    merely a string round-trips to a 400 the SDK could have named itself."""
+    urlopen, captured = _capture_urlopen(body=b"{}")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        with pytest.raises(FloeAgentError, match="occurred_at"):
+            agent.emit_outcome(
+                "call-1", "meeting_booked", idempotency_key="k1", occurred_at=bad
+            )
+    assert captured == []  # refused before any request
+
+
+def test_emit_outcome_sends_a_well_formed_occurred_at() -> None:
+    response = {
+        "outcome": {
+            "eventId": "oev_00112233445566aa",
+            "interactionId": "int_1",
+            "outcomeKind": "meeting_booked",
+            "status": "reported",
+            "quantity": 1,
+            "occurredAt": "2026-09-15T10:30:00Z",
+            "confirmedAt": None,
+            "source": "agent",
+            "externalSystem": None,
+            "externalRef": None,
+            "evidenceNote": None,
+            "supersedesEventId": None,
+            "billedInPeriodId": None,
+        }
+    }
+    urlopen, captured = _capture_urlopen(body=json.dumps(response).encode())
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        agent.emit_outcome(
+            "call-1",
+            "meeting_booked",
+            idempotency_key="k1",
+            occurred_at="2026-09-15T10:30:00Z",
+        )
+
+    assert json.loads(captured[0].data.decode())["occurredAt"] == "2026-09-15T10:30:00Z"
+
+
 def test_emit_outcome_rejects_external_ref_without_system_locally() -> None:
     agent = FloeAgent(api_key="floe_test")
     with pytest.raises(FloeAgentError, match="external_ref requires external_system"):
