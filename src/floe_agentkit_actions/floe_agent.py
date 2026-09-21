@@ -127,7 +127,18 @@ def _parse_budget_advisory(headers: dict[str, str]) -> Optional[BudgetAdvisory]:
 def _validate_tag(name: str, value: str) -> str:
     """Validate a ``task_id``/``action_id`` attribution tag: 1..128 chars
     after stripping. The server lowercases; the stripped value passes through
-    unchanged."""
+    unchanged.
+
+    Typed as ``str``, but a runtime caller can pass anything. Guarding here
+    rather than at each call site covers all four — ``fetch``'s task_id and
+    action_id, ``report_outcome`` and ``emit_outcome`` — and turns what was an
+    ``AttributeError`` from ``.strip()`` into the ``FloeAgentError`` this
+    client promises for every other bad argument.
+    """
+    if not isinstance(value, str):
+        raise FloeAgentError(
+            f"{name} must be a string (got {type(value).__name__}).", 400
+        )
     trimmed = value.strip()
     if len(trimmed) == 0 or len(trimmed) > MAX_TAG_LENGTH:
         raise FloeAgentError(

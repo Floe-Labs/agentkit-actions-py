@@ -271,6 +271,31 @@ def test_emit_outcome_sends_a_well_formed_occurred_at() -> None:
     assert json.loads(captured[0].data.decode())["occurredAt"] == "2026-09-15T10:30:00Z"
 
 
+@pytest.mark.parametrize("bad", [123, True, None.__class__, object()])
+def test_emit_outcome_rejects_a_non_string_task_id_locally(bad: object) -> None:
+    """`_validate_tag` called `.strip()` on whatever it was given, so a
+    non-string raised AttributeError instead of the typed error this client
+    promises for every other bad argument. Hardened in the helper, which
+    covers fetch's two tags and report_outcome as well."""
+    urlopen, captured = _capture_urlopen(body=b"{}")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        with pytest.raises(FloeAgentError, match="task_id must be a string"):
+            agent.emit_outcome(bad, "meeting_booked", idempotency_key="k1")  # type: ignore[arg-type]
+    assert captured == []  # refused before any request
+
+
+def test_report_outcome_also_rejects_a_non_string_action_id() -> None:
+    """The same hardening, reached through the other caller — proof it was
+    fixed in the helper rather than patched at one call site."""
+    urlopen, captured = _capture_urlopen(body=b"{}")
+    agent = FloeAgent(api_key="floe_test")
+    with patch("urllib.request.urlopen", urlopen):
+        with pytest.raises(FloeAgentError, match="action_id must be a string"):
+            agent.report_outcome(42, "success")  # type: ignore[arg-type]
+    assert captured == []
+
+
 def test_emit_outcome_rejects_external_ref_without_system_locally() -> None:
     agent = FloeAgent(api_key="floe_test")
     with pytest.raises(FloeAgentError, match="external_ref requires external_system"):
