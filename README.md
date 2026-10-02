@@ -1,3 +1,7 @@
+> [!WARNING]
+> **`floe-agentkit-actions` is deprecated.** It is in security-fix-only mode — no new features — and this repository will be archived.
+> For spend metering and budget gating, use [`floe-guard`](https://github.com/Floe-Labs/floe-guard). For platform access (agents, keys, budgets, billing), use [`@floelabs/cli`](https://github.com/Floe-Labs/floe-cli).
+
 # floe-agentkit-actions
 
 [![PyPI version](https://img.shields.io/pypi/v/floe-agentkit-actions)](https://pypi.org/project/floe-agentkit-actions/)
